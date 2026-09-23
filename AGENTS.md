@@ -17,6 +17,7 @@ scripts/             运行脚本
 third_party/         只读 git submodule
   FwdLLM/            UbiquitousLearning/FwdLLM @36ecdbc（FedML 已 vendored 为普通跟踪文件）
   Jenga/             Pairshoe/Jenga-AE @23764a6（ATC'25 artifact，含 OPT 模型与 predictor）
+  VQ/                本地 Count Sketch 有损压缩库 @bc2c4ad（无远程，URL=file:///D:/GitRepository/Projects/FedLLM/VQ）
 docs/                standard.md、ailog/（新日志）、old_ailog/（v2 历史）、reference/（论文，gitignore）
 checkpoints/ dataset/ logs/ temp/   运行时目录，已 gitignore
 ```
@@ -27,7 +28,8 @@ checkpoints/ dataset/ logs/ temp/   运行时目录，已 gitignore
 ## Git / submodule
 
 - SMELL-v3 是独立 git 仓库（`main`，2026-09-23 初始化），父仓库 FedLLM 不跟踪它。
-- 两个 submodule 已固定（git dir 在 `.git/modules/`）；clone 后 `git submodule update --init --recursive`。
+- 三个 submodule 已固定（git dir 在 `.git/modules/`）；clone 后 `git submodule update --init --recursive`（VQ 的 URL 是本地 `file:///D:/...`，迁到 WSL 后要先把 `.gitmodules` 改成对应路径再 update）。
+- **VQ 无远程**，唯一上游是父仓库 `../VQ`。VQ 更新流程：先在 `../VQ` commit，再 `git -C third_party/VQ fetch origin main; git -C third_party/VQ merge --ff-only FETCH_HEAD; git add third_party/VQ`。
 - **不要直接改 third_party 里的文件**（会产生脏指针）。需要上游改动时 fork/branch 后更新指针：
   `git -C third_party/FwdLLM fetch; git -C third_party/FwdLLM checkout <commit>; git add third_party/FwdLLM; git commit`
 - 提交信息：`SMELL v3: <English summary>`（沿用旧规范 `SMELL Phase N: ...` 的风格）；不要 amend 已 push 的提交。
@@ -35,9 +37,10 @@ checkpoints/ dataset/ logs/ temp/   运行时目录，已 gitignore
 
 ## 环境
 
-- 用 **Jenga 技术栈**：Python 3.10 · torch 2.1.2 · transformers 4.45.2 · peft · bf16 + flash-attn。**不要**用 FwdLLM 的 Python 3.7 / functorch 栈。
-- v2 conda 环境名 `smell-v2`；v3 尚无 requirements.txt（2026-09-23）。
-- 权重：`third_party/Jenga/checkpoints/opt-350m/`（来自 `facebook/opt-350m`）+ `predictor/`、`peft_model/`；压缩包在父仓库 `../download/`（`dataset.zip`、`peft_model.zip`、`predictor.zip`）。
+- 用 **Jenga 技术栈**：Python 3.10 · transformers 4.45.2 · peft · bf16 + flash-attn。**不要**用 FwdLLM 的 Python 3.7 / functorch 栈。
+- WSL conda 环境已就绪：Miniconda3 在 `~/miniconda3`，env **`SMELL`**（Python 3.10.21）；安装快照 `requirements-wsl-cu128.txt`（根目录）。Jenga 权重/数据集已解压到 `third_party/Jenga/{checkpoints,dataset}`（gitignore），`jenga_src.pth` 已注入 env site-packages，任意 shell 可直接 `import jenga`。
+- Jenga pin 的 torch 2.1.2 在 RTX 5060（sm_120）不可用；实装 **torch 2.8.0+cu128**（2.8.1 不存在）+ **flash-attn 2.8.3 cxx11abiTRUE** wheel（eager 2048 会溢到系统内存，必须走 FA2）；验证见 `docs/ailog/260923-161344-smell-v3-wsl-jenga-smoke-result.md`。
+- 权重：`third_party/Jenga/checkpoints/opt-350m/`（来自 `facebook/opt-350m`）+ `predictor/`、`peft_model/`；压缩包在父仓库 `../download/`（`dataset.zip`、`peft_model.zip`、`predictor.zip`）。llama2/llama3 为 gated 且 7B 超 8GB 显存，本机不可用。
 
 ## OPT-350M 迁移要点（v2 代码是 Llama 专用）
 
