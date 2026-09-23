@@ -6,4 +6,4 @@
 	url = https://github.com/Pairshoe/Jenga-AE.git
 [submodule "third_party/VQ"]
 	path = third_party/VQ
-	url = file:///D:/GitRepository/Projects/FedLLM/VQ
+	url = git@github.com:2069661643/SMELL-VQ.git

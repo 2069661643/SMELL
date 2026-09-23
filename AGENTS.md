@@ -17,7 +17,7 @@ scripts/             运行脚本
 third_party/         只读 git submodule
   FwdLLM/            UbiquitousLearning/FwdLLM @36ecdbc（FedML 已 vendored 为普通跟踪文件）
   Jenga/             Pairshoe/Jenga-AE @23764a6（ATC'25 artifact，含 OPT 模型与 predictor）
-  VQ/                本地 Count Sketch 有损压缩库 @bc2c4ad（无远程，URL=file:///D:/GitRepository/Projects/FedLLM/VQ）
+  VQ/                Count Sketch 有损压缩库 @bc2c4ad（GitHub: 2069661643/SMELL-VQ；本地父仓库 ../VQ 仍为开发上游）
 docs/                standard.md、ailog/（新日志）、old_ailog/（v2 历史）、reference/（论文，gitignore）
 checkpoints/ dataset/ logs/ temp/   运行时目录，已 gitignore
 ```
@@ -28,8 +28,8 @@ checkpoints/ dataset/ logs/ temp/   运行时目录，已 gitignore
 ## Git / submodule
 
 - SMELL-v3 是独立 git 仓库（`main`，2026-09-23 初始化），父仓库 FedLLM 不跟踪它。
-- 三个 submodule 已固定（git dir 在 `.git/modules/`）；clone 后 `git submodule update --init --recursive`（VQ 的 URL 是本地 `file:///D:/...`，迁到 WSL 后要先把 `.gitmodules` 改成对应路径再 update）。
-- **VQ 无远程**，唯一上游是父仓库 `../VQ`。VQ 更新流程：先在 `../VQ` commit，再 `git -C third_party/VQ fetch origin main; git -C third_party/VQ merge --ff-only FETCH_HEAD; git add third_party/VQ`。
+- 三个 submodule 已固定（git dir 在 `.git/modules/`）；clone 后 `git submodule update --init --recursive`。
+- **VQ 已上 GitHub**（`git@github.com:2069661643/SMELL-VQ.git`，submodule 内 remote 名 `github`）；开发上游仍是父仓库 `../VQ`（submodule 内 `origin=file:///D:...`）。VQ 更新流程：先在 `../VQ` commit，再 `git -C third_party/VQ fetch origin main; git -C third_party/VQ merge --ff-only FETCH_HEAD; git add third_party/VQ`；发布时 `git -C third_party/VQ push github main`。注意 `git submodule sync` 会把 submodule 的 origin 改写成 GitHub URL。
 - **不要直接改 third_party 里的文件**（会产生脏指针）。需要上游改动时 fork/branch 后更新指针：
   `git -C third_party/FwdLLM fetch; git -C third_party/FwdLLM checkout <commit>; git add third_party/FwdLLM; git commit`
 - 提交信息：`SMELL v3: <English summary>`（沿用旧规范 `SMELL Phase N: ...` 的风格）；不要 amend 已 push 的提交。
