@@ -1,0 +1,13 @@
+# runtime artifacts — never commit
+checkpoints/
+dataset/
+logs/
+temp/
+
+# reference papers (PDFs/LaTeX, ~64 MB) — keep local only
+docs/reference/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/

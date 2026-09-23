@@ -1,0 +1,6 @@
+[submodule "third_party/FwdLLM"]
+	path = third_party/FwdLLM
+	url = https://github.com/UbiquitousLearning/FwdLLM.git
+[submodule "third_party/Jenga"]
+	path = third_party/Jenga
+	url = https://github.com/Pairshoe/Jenga-AE.git
