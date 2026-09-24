@@ -42,6 +42,15 @@ checkpoints/ dataset/ logs/ temp/   运行时目录，已 gitignore
 - Jenga pin 的 torch 2.1.2 在 RTX 5060（sm_120）不可用；实装 **torch 2.8.0+cu128**（2.8.1 不存在）+ **flash-attn 2.8.3 cxx11abiTRUE** wheel（eager 2048 会溢到系统内存，必须走 FA2）；验证见 `docs/ailog/260923-161344-smell-v3-wsl-jenga-smoke-result.md`。
 - 权重：`third_party/Jenga/checkpoints/opt-350m/`（来自 `facebook/opt-350m`）+ `predictor/`、`peft_model/`；压缩包在父仓库 `../download/`（`dataset.zip`、`peft_model.zip`、`predictor.zip`）。llama2/llama3 为 gated 且 7B 超 8GB 显存，本机不可用。
 
+## 长任务与双平台约定
+
+- **长任务一律后台化**：预计 >1 分钟的步骤（数据构建、smoke、显存矩阵、评测/训练）不得前台直跑。写成 `temp/run_<name>_bg.sh`（`temp/` 已 gitignore），用 `setsid nohup bash temp/run_<name>_bg.sh >/dev/null 2>&1 < /dev/null &` 启动。
+- **每步打点**：driver 脚本对每个阶段输出 `[HH:MM:SS] STEP ...` 时间戳，日志追加到 `temp/logs/<name>_YYMMDD-HHMMSS/driver.log`，并写 `temp/logs/last_<name>.pid` 与 `temp/logs/last_<name>_dir.txt` 便于定位。
+- **启动确认**：启动后 `sleep 30` 检查日志/进程/GPU 是否正常起步；起不来或立刻报错必须当场修复，不留悬空任务。
+- **结果检查由聊天触发**：长任务完成后无需空等，由用户在聊天里唤醒 agent，按 `last_<name>_dir.txt` 读日志、校验产物并汇报结论。
+- **禁止内联 shell 变量**：本环境的 Windows→WSL 包装会吞掉内联 `$VAR` 与引号；命令一律写入脚本文件或用显式路径。
+- **双平台分工**：本机（8GB）只跑 ≤4k smoke，或接受 WSL 显存溢出（16k 纯前向也超 8GB 物理显存，`set_per_process_memory_fraction(0.9)` 可暴露真 OOM）；16k 正式实验（c=30、α∈{0.1,0.3}、CATV±）在云端 A40×4，一次实验 1 卡、30 client 串行、4 卡并发做消融。数据/权重不进 git，云端从 hf-mirror + Jenga zips 重建。
+
 ## OPT-350M 迁移要点（v2 代码是 Llama 专用）
 
 - 在 `src/` 新建 OPT 版模型/训练代码；v2 的 `modeling_llama_base.py` / `modeling_llama_sparse.py` / `predictor.py` 不能直接复用，Jenga 的 `modeling_opt.py`（`OPTForCausalLM`）是主要参考。上游 FwdLLM 只支持 DistilBERT（`initializer.py` 的 `MODEL_CLASSES`），ZOO/JVP 与联邦管线要自己接。
