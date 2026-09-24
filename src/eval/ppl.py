@@ -39,6 +39,8 @@ def parse_args():
     parser.add_argument("--sparse", type=float, default=0.4)
     parser.add_argument("--pos-mode", choices=("jenga_dup_scaled", "duplicate", "interpolate"),
                         default="jenga_dup_scaled")
+    # SMELL 3 ppl pos_checkpoint ADD — 加载 longctx 适配后的 embed_positions 权重（2k 回归 / 16k 评测）
+    parser.add_argument("--pos-checkpoint", default=None, help="pos_embed.pt loaded into embed_positions")
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument("--truncate", type=int, default=0, help="testing only: use first N tokens")
     parser.add_argument("--out", default=None, help="JSON output path")
@@ -83,6 +85,24 @@ def build_model(args, effective_max_len):
     model = OPTForCausalLM.from_pretrained(args.model_dir, torch_dtype=torch.bfloat16, config=config)
     # SMELL 3 position_embed ADD — 16k 序列需扩展 embed_positions（OPT 原表仅 2050 行）
     model = ensure_positions(model, effective_max_len, mode=args.pos_mode)
+    # SMELL 3 ppl pos_checkpoint BEGIN — 覆盖为 warmup 训得的 embed_positions（形状不符时按行数再扩展）
+    if args.pos_checkpoint:
+        pos_payload = torch.load(args.pos_checkpoint, map_location="cpu")
+        if isinstance(pos_payload, dict):
+            pos_payload = pos_payload.get("weight", pos_payload)
+        assert torch.is_tensor(pos_payload), f"unsupported pos checkpoint payload: {type(pos_payload)}"
+        target_weight = model.model.decoder.embed_positions.weight
+        if tuple(pos_payload.shape) != tuple(target_weight.shape):
+            same_width = pos_payload.dim() == 2 and pos_payload.shape[1] == target_weight.shape[1]
+            if same_width and pos_payload.shape[0] > target_weight.shape[0]:
+                offset = int(model.model.decoder.embed_positions.offset)
+                model = ensure_positions(model, int(pos_payload.shape[0]) - offset)
+                target_weight = model.model.decoder.embed_positions.weight
+        assert tuple(pos_payload.shape) == tuple(target_weight.shape), (
+            f"pos checkpoint shape {tuple(pos_payload.shape)} != embed_positions {tuple(target_weight.shape)}")
+        with torch.no_grad():
+            target_weight.copy_(pos_payload.to(device=target_weight.device, dtype=target_weight.dtype))
+    # SMELL 3 ppl pos_checkpoint END
     model = model.cuda().eval()
     if args.adapter:
         from peft import PeftModel

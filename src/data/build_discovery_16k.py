@@ -3,8 +3,8 @@
 import os
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-os.environ["HF_HUB_DISABLE_XET"] = "1"
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")  # SMELL 3 build_discovery_16k HF_ENDPOINT MODIFIED — 允许环境变量覆盖（云端 hf-mirror 不可达时用 huggingface.co）
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")  # SMELL 3 build_discovery_16k HF_HUB_DISABLE_XET MODIFIED — 允许环境变量覆盖（云端改用 XET 提升下载稳定性）
 os.environ.setdefault("HF_HOME", os.path.join(_ROOT, "temp", "hf_cache"))
 os.environ.setdefault("HF_DATASETS_CACHE", os.path.join(_ROOT, "temp", "hf_cache", "datasets"))
 
