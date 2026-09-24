@@ -189,6 +189,7 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx):
     from src.fed.serial_fedavg import append_metrics
     adapter_dir = out_dir / f"adapter_round{round_idx:03d}"
     model.save_pretrained(str(adapter_dir))
+    # SMELL 3 run_fed eval_lora_checkpoint ADD — 记录每次 eval 保存的 LoRA checkpoint 路径
     eval_out = out_dir / f"eval_round{round_idx:03d}.json"
     command = [
         sys.executable, str(REPO / "src" / "eval" / "ppl.py"),
@@ -210,14 +211,20 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx):
             "returncode": proc.returncode, "stderr_tail": proc.stderr[-500:],
             # SMELL 3 run_fed trainer ADD — eval 记录也标注本地训练器
             "trainer": args.trainer,
+            # SMELL 3 run_fed eval_lora_checkpoint ADD — 记录每次 eval 保存的 LoRA checkpoint 路径
+            "lora_checkpoint": str(adapter_dir),
         })
         print(f"[fed] eval round {round_idx} FAILED rc={proc.returncode}: {proc.stderr.strip()[-200:]}")
+        print(f"[fed] eval round {round_idx} lora_checkpoint={adapter_dir}")
         return None
     payload = json.loads(eval_out.read_text(encoding="utf-8"))
     append_metrics(metrics_path, {"event": "eval", "round": round_idx, "status": "ok",
-                                  "trainer": args.trainer, **payload})
+                                  "trainer": args.trainer,
+                                  # SMELL 3 run_fed eval_lora_checkpoint ADD — 记录每次 eval 保存的 LoRA checkpoint 路径
+                                  "lora_checkpoint": str(adapter_dir), **payload})
     print(f"[fed] eval round {round_idx} full_ppl_token={payload['full_ppl_token']} "
           f"answer_ppl_token={payload['answer_ppl_token']}")
+    print(f"[fed] eval round {round_idx} lora_checkpoint={adapter_dir}")
     return payload
 
 
