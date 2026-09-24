@@ -63,14 +63,18 @@ class _VoteAccumulator:
 
 
 class ClientRunner:
-    """在 model 的可训练参数上做 local_steps 次 ZOO 更新。
+    """在 model 的可训练参数上做 local_steps 次本地更新（ZOO 或 BP）。
 
+    # SMELL 3 ClientRunner bp MODIFIED — trainer="bp" 时用标准反传（autocast bf16 + AdamW + 梯度裁剪）替代中心差分
     selector（CATV/Jenga sparse）由调用方或模型内部应用，这里只保存引用。
     collect_votes=True 时在本地训练期间收集 CATV 块投票（每次 forward，含 ZOO 中心差分两次探测）。
     """
 
     def __init__(self, model, local_steps=20, lr=1e-3, zo_eps=1e-3,
-                 zo_directions=8, selector=None, collect_votes=False):
+                 zo_directions=8, selector=None, collect_votes=False,
+                 # SMELL 3 ClientRunner trainer ADD — zoo=前向梯度（默认，字节兼容）；bp=标准反传本地训练
+                 trainer="zoo", bp_clip=1.0):
+        assert trainer in ("zoo", "bp"), f"unknown trainer: {trainer}"
         self.model = model
         self.local_steps = int(local_steps)
         self.lr = float(lr)
@@ -79,6 +83,8 @@ class ClientRunner:
         self.selector = selector
         # SMELL 3 ClientRunner collect_votes ADD — CATV 投票开关
         self.collect_votes = bool(collect_votes)
+        self.trainer = str(trainer)
+        self.bp_clip = float(bp_clip)
 
     def _loss_fn(self, input_ids):
         return lambda: self.model(input_ids, labels=input_ids).loss
@@ -100,6 +106,12 @@ class ClientRunner:
             assert names, "model has no trainable parameters (did LoRA wrapping run?)"
             device = sample_flat.device
             initial = get_trainable_state_dict(self.model)
+            # SMELL 3 ClientRunner bp optimizer ADD — BP: 对全部可训练参数建 AdamW（--lr 可调）
+            optimizer = None
+            bp_params = None
+            if self.trainer == "bp":
+                bp_params = [param for param in self.model.parameters() if param.requires_grad]
+                optimizer = torch.optim.AdamW(bp_params, lr=self.lr, weight_decay=0.0)
 
             iterator = iter(input_ids_iterable)
             losses = []
@@ -112,6 +124,19 @@ class ClientRunner:
                 if isinstance(input_ids, dict):
                     input_ids = input_ids["input_ids"]
                 input_ids = input_ids.to(device)
+                # SMELL 3 ClientRunner bp BEGIN — zero_grad → autocast bf16 前向 → backward → clip → step
+                if self.trainer == "bp":
+                    optimizer.zero_grad(set_to_none=True)
+                    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                        loss = self.model(input_ids=input_ids, labels=input_ids, use_cache=False).loss
+                    loss.backward()
+                    losses.append(float(loss.detach().float().cpu()))
+                    if self.bp_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(bp_params, self.bp_clip)
+                    optimizer.step()
+                    steps += 1
+                    continue
+                # SMELL 3 ClientRunner bp END
                 with torch.no_grad():
                     losses.append(float(self.model(input_ids, labels=input_ids).loss.detach().cpu()))
                 grad = zo_grad(self.model, self._loss_fn(input_ids), self.zo_eps, self.zo_directions)
@@ -131,6 +156,8 @@ class ClientRunner:
             "train_loss": (sum(losses) / len(losses)) if losses else None,
             "steps": steps,
             "lr": self.lr,
+            # SMELL 3 ClientRunner trainer ADD — 记录本 client 使用的本地训练器
+            "trainer": self.trainer,
         }
         # SMELL 3 ClientRunner votes ADD — CATV: 返回逐层 CPU fp32 平均块投票
         if vote_accumulator is not None:

@@ -44,6 +44,16 @@ def parse_args():
     parser.add_argument("--max-train-samples", type=int, default=0)
     parser.add_argument("--zo-eps", type=float, default=1e-3)
     parser.add_argument("--zo-directions", type=int, default=8)
+    # SMELL 3 run_fed trainer ADD — zoo=前向梯度本地更新（默认）；bp=标准反传本地训练（Step 3 机制去风险）
+    parser.add_argument("--trainer", choices=("zoo", "bp"), default="zoo")
+    parser.add_argument("--bp-clip", type=float, default=1.0, help="BP grad clip norm; <=0 disables clipping")
+    # SMELL 3 run_fed truncate ADD — smoke 用：每条训练序列只取前 N token（0 = 关闭，全长）
+    parser.add_argument("--truncate", type=int, default=0, help="smoke only: train on first N tokens; 0 = full seq")
+    # SMELL 3 run_fed init-path ADD — warmup 产物初始化：位置表 + LoRA 适配器（云端 Step 3/4 复用）
+    parser.add_argument("--pos-checkpoint", default=None, help="pos_embed.pt loaded into embed_positions BEFORE LoRA")
+    parser.add_argument("--adapter-init", default=None, help="PEFT adapter dir used to initialize LoRA (kept trainable)")
+    # SMELL 3 run_fed act_pack ADD — BP 默认旁路 Jenga 半丢弃 hooks（避免梯度静默污染）；ZOO 不受影响
+    parser.add_argument("--act-pack", choices=("off", "on"), default="off")
     parser.add_argument("--eval-every", type=int, default=0, help="0 = off; else run ppl.py every N rounds")
     parser.add_argument("--out-root", default="logs/fed")
     return parser.parse_args()
@@ -101,10 +111,14 @@ def load_partition_counts(path):
     return counts
 
 
-def iter_batches(input_ids_np, num_samples, device):
+def iter_batches(input_ids_np, num_samples, device, truncate=0):
     import torch
     for index in range(num_samples):
-        row = torch.from_numpy(input_ids_np[index].astype(np.int64))
+        row = input_ids_np[index]
+        # SMELL 3 run_fed truncate ADD — smoke：只保留前 N 个 token（0 = 不截断）
+        if truncate > 0:
+            row = row[:truncate]
+        row = torch.from_numpy(row.astype(np.int64))
         yield row.unsqueeze(0).to(device)
 
 
@@ -145,11 +159,14 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx):
         append_metrics(metrics_path, {
             "event": "eval", "round": round_idx, "status": "failed",
             "returncode": proc.returncode, "stderr_tail": proc.stderr[-500:],
+            # SMELL 3 run_fed trainer ADD — eval 记录也标注本地训练器
+            "trainer": args.trainer,
         })
         print(f"[fed] eval round {round_idx} FAILED rc={proc.returncode}: {proc.stderr.strip()[-200:]}")
         return None
     payload = json.loads(eval_out.read_text(encoding="utf-8"))
-    append_metrics(metrics_path, {"event": "eval", "round": round_idx, "status": "ok", **payload})
+    append_metrics(metrics_path, {"event": "eval", "round": round_idx, "status": "ok",
+                                  "trainer": args.trainer, **payload})
     print(f"[fed] eval round {round_idx} full_ppl_token={payload['full_ppl_token']} "
           f"answer_ppl_token={payload['answer_ppl_token']}")
     return payload
@@ -174,11 +191,18 @@ def main():
     from src.models.modeling_opt_smell import OPTForCausalLM
     from jenga.utils.config_utils import get_opt_qk
 
-    from src.fed.serial_fedavg import ClientRunner, ServerAggregator, append_metrics
+    from src.fed.serial_fedavg import ClientRunner, ServerAggregator, append_metrics, resolve_model_config
     from src.models.position_embed import ensure_positions
     # SMELL 3 run_fed imports ADD — CATV 服务器端掩码计算与 IR 指标
     from src.models.token_selector import compute_consensus_mask, mask_intersection_rate
     from src.train.lora import build_lora_model, count_trainable, get_trainable_state_dict, load_trainable_state_dict
+
+    # SMELL 3 run_fed act_pack BEGIN — BP 旁路 Jenga modeling_opt 的 pack/unpack hooks（否则后一半 token 梯度被静默置零）
+    if args.trainer == "bp" and args.act_pack == "off":
+        import src.models.modeling_opt_smell as modeling
+        modeling.pack_hook = lambda tensor: tensor
+        modeling.unpack_hook = lambda tensor: tensor
+    # SMELL 3 run_fed act_pack END
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -198,16 +222,48 @@ def main():
     first_train_ids = np.load(data_root / args.tag / "clients" / client_names[0] / "train_input_ids.npy",
                               mmap_mode="r")
     train_seq_len = int(first_train_ids.shape[1])
-    # SMELL 3 run_fed n_blocks ADD — CATV: 每层块数 N = seq_len / pool_size
-    n_blocks = train_seq_len // BLOCK_SIZE
+    # SMELL 3 run_fed truncate ADD — 有效序列长度 = min(truncate, 全长)（0 = 关闭）；位置表按有效长度扩展
+    effective_seq_len = min(train_seq_len, args.truncate) if args.truncate > 0 else train_seq_len
+    # SMELL 3 run_fed n_blocks ADD — CATV: 每层块数 N = seq_len / pool_size（按有效序列长度）
+    n_blocks = effective_seq_len // BLOCK_SIZE
 
     config = get_opt_qk(model_name=args.model_dir, flash_attention=True, pool_size=64,
                         thresh=args.sparse)
     model = OPTForCausalLM.from_pretrained(args.model_dir, torch_dtype=torch.bfloat16, config=config)
     # SMELL 3 run_fed base_config ADD — 保存 LoRA 包装前的 OPTConfig 引用（vote_callback/consensus_mask 挂载点）
     base_config = model.config
-    model = ensure_positions(model, train_seq_len)
-    model = build_lora_model(model, r=8, targets=LORA_TARGETS)
+    model = ensure_positions(model, effective_seq_len)
+    # SMELL 3 run_fed pos_checkpoint BEGIN — warmup 位置表注入（LoRA 包装前）；checkpoint 更大时按行数扩展后精确形状校验
+    if args.pos_checkpoint:
+        pos_path = resolve(args.pos_checkpoint)
+        pos_payload = torch.load(pos_path, map_location="cpu")
+        if isinstance(pos_payload, dict):
+            pos_payload = pos_payload.get("weight", pos_payload)
+        assert torch.is_tensor(pos_payload), f"unsupported pos checkpoint payload: {type(pos_payload)}"
+        target_weight = model.model.decoder.embed_positions.weight
+        if tuple(pos_payload.shape) != tuple(target_weight.shape):
+            if (pos_payload.dim() == 2 and pos_payload.shape[1] == target_weight.shape[1]
+                    and pos_payload.shape[0] > target_weight.shape[0]):
+                pos_offset = int(model.model.decoder.embed_positions.offset)
+                model = ensure_positions(model, int(pos_payload.shape[0]) - pos_offset)
+                target_weight = model.model.decoder.embed_positions.weight
+        assert tuple(pos_payload.shape) == tuple(target_weight.shape), (
+            f"pos checkpoint shape {tuple(pos_payload.shape)} != embed_positions {tuple(target_weight.shape)}")
+        with torch.no_grad():
+            target_weight.copy_(pos_payload.to(device=target_weight.device, dtype=target_weight.dtype))
+        print(f"[fed] pos_checkpoint loaded path={pos_path} shape={tuple(target_weight.shape)}")
+    # SMELL 3 run_fed pos_checkpoint END
+    # SMELL 3 run_fed adapter_init BEGIN — 载入 warmup 训练好的 LoRA 适配器（is_trainable=True，继续参与 FedAvg）
+    if args.adapter_init:
+        from peft import PeftModel
+        adapter_path = resolve(args.adapter_init)
+        model = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=True)
+        # SMELL 3 run_fed adapter_init FIXED — from_pretrained 返回新 PeftModel；重解析共享 config，保证 consensus_mask/vote_callback 可挂载
+        base_config = resolve_model_config(model)
+        print(f"[fed] adapter_init loaded path={adapter_path} trainable_params={count_trainable(model)}")
+    else:
+        model = build_lora_model(model, r=8, targets=LORA_TARGETS)
+    # SMELL 3 run_fed adapter_init END
     model = model.cuda().train()
     global_state = get_trainable_state_dict(model)
     trainable_params = count_trainable(model)
@@ -226,13 +282,19 @@ def main():
         # SMELL 3 run_fed catv config ADD — 生效的锚比例与块数
         "resolved_catv_r": catv_r,
         "n_blocks": n_blocks,
+        # SMELL 3 run_fed config ADD — 有效序列长度与初始化路径（可复现性）
+        "train_full_seq_len": train_seq_len,
+        "effective_seq_len": effective_seq_len,
+        "resolved_pos_checkpoint": str(resolve(args.pos_checkpoint)) if args.pos_checkpoint else None,
+        "resolved_adapter_init": str(resolve(args.adapter_init)) if args.adapter_init else None,
         "torch_version": torch.__version__,
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
     }
     (out_dir / "config.json").write_text(json.dumps(run_config, indent=2, default=str), encoding="utf-8")
 
     print(f"[fed] tag={args.tag} clients={len(client_names)} trainable_params={trainable_params} "
-          f"weight={args.weight} sparse={args.sparse} lr={args.lr} seed={args.seed}")
+          f"weight={args.weight} sparse={args.sparse} lr={args.lr} seed={args.seed} "
+          f"trainer={args.trainer} truncate={args.truncate} seq_len={effective_seq_len}")
     print(f"[fed] data={data_root} out={out_dir}")
     if partition_counts:
         covered = sum(1 for name in client_names
@@ -259,8 +321,11 @@ def main():
             load_trainable_state_dict(model, global_state)
             runner = ClientRunner(model, local_steps=args.local_steps, lr=args.lr,
                                   zo_eps=args.zo_eps, zo_directions=args.zo_directions,
-                                  collect_votes=catv_on)
-            result = runner.run(iter_batches(input_ids_np, num_samples, model.device))
+                                  collect_votes=catv_on,
+                                  # SMELL 3 run_fed trainer ADD — 本地训练器与 BP 裁剪阈值
+                                  trainer=args.trainer, bp_clip=args.bp_clip)
+            result = runner.run(iter_batches(input_ids_np, num_samples, model.device,
+                                             truncate=args.truncate))
             deltas.append(result["delta"])
             counts.append(num_samples)
             losses.append(result["train_loss"])
@@ -307,6 +372,8 @@ def main():
             "lr": args.lr,
             "local_steps": args.local_steps,
             "zo_directions": args.zo_directions,
+            # SMELL 3 run_fed trainer ADD — 每条 round 记录本地训练器（zoo|bp）
+            "trainer": args.trainer,
             "round_seconds": time.time() - round_started,
         }
         # SMELL 3 run_fed catv mask BEGIN — 本轮投票 → 下一轮共识锚掩码 + 掩码文件 + IR 指标
@@ -352,6 +419,10 @@ def main():
         if args.eval_every > 0 and (round_idx + 1) % args.eval_every == 0:
             run_global_eval(args, model, out_dir, metrics_path, round_idx)
 
+    # SMELL 3 run_fed peak_mem ADD — 报告 CUDA 峰值显存（8GB 卡 BP smoke 的 OOM 判据）
+    if torch.cuda.is_available():
+        print(f"[fed] cuda peak allocated={torch.cuda.max_memory_allocated() / 2**30:.2f}GiB "
+              f"reserved={torch.cuda.max_memory_reserved() / 2**30:.2f}GiB")
     print(f"[fed] done; metrics={metrics_path}")
 
 
