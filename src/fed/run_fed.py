@@ -55,6 +55,9 @@ def parse_args():
     # SMELL 3 run_fed init-path ADD — warmup 产物初始化：位置表 + LoRA 适配器（云端 Step 3/4 复用）
     parser.add_argument("--pos-checkpoint", default=None, help="pos_embed.pt loaded into embed_positions BEFORE LoRA")
     parser.add_argument("--adapter-init", default=None, help="PEFT adapter dir used to initialize LoRA (kept trainable)")
+    # SMELL 3 run_fed lora_rank ADD — LoRA 秩与 alpha（无 adapter-init 时生效；r=1 建议 alpha≈2 以保持 alpha/r 缩放）
+    parser.add_argument("--lora-r", type=int, default=8)
+    parser.add_argument("--lora-alpha", type=float, default=16)
     # SMELL 3 run_fed predictor ADD — predictor.pth + pruned_config.pth 接线（None = 不加载，保持随机初始化）
     parser.add_argument("--predictor", default=None,
                         help="predictor.pth (Jenga PrunableAttnPredictorInfer weights); requires --pruned-config")
@@ -336,7 +339,7 @@ def main():
         base_config = resolve_model_config(model)
         print(f"[fed] adapter_init loaded path={adapter_path} trainable_params={count_trainable(model)}")
     else:
-        model = build_lora_model(model, r=8, targets=LORA_TARGETS)
+        model = build_lora_model(model, r=args.lora_r, lora_alpha=args.lora_alpha, targets=LORA_TARGETS)
     # SMELL 3 run_fed adapter_init END
     model = model.cuda().train()
     global_state = get_trainable_state_dict(model)
