@@ -3,11 +3,11 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY="$HOME/miniconda3/envs/SMELL/bin/python"
+PY="${PY:-$HOME/applications/anaconda3/envs/smell-v2/bin/python}"  # SMELL 3 run_ablation_cloud PY MODIFIED — 云端 conda 在 applications/anaconda3（miniconda3 不存在），可用 PY= 覆盖
 GPU_LIST="0,1,2,3"
 ROUNDS=30
 LOCAL_STEPS=20
-LR=1e-4
+LR=1e-7  # SMELL 3 run_ablation_cloud ZOO_LR MODIFIED — ZOO lr 由 1e-4 标定为 1e-7（Step3：δ∝lr，匹配 BP δ≈0.3；待 BP 收敛复核）
 ZO_DIRS=8
 ZO_EPS=1e-3
 SPARSE=0.4
@@ -21,7 +21,7 @@ DRY_RUN=0
 usage() {
   cat <<'EOF'
 usage: bash scripts/run_ablation_cloud.sh [--gpus 0,1,2,3] [--rounds 30] [--local-steps 20]
-       [--lr 1e-4] [--zo-directions 8] [--zo-eps 1e-3] [--sparse 0.4] [--catv-r 0.2]
+       [--lr 1e-7] [--zo-directions 8] [--zo-eps 1e-3] [--sparse 0.4] [--catv-r 0.2]
        [--pos-checkpoint PATH] [--adapter-init PATH] [--data-root DIR] [--out-root DIR] [--dry-run]
 mapping: GPU0=a01 CATV off, GPU1=a01 CATV on, GPU2=a03 CATV off, GPU3=a03 CATV on
 EOF
