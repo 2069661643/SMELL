@@ -196,9 +196,7 @@ def main():
     expect(global_q and max(global_q) < test_size,
            f"global_test_query_idx within test_size={test_size}",
            f"global_test_query_idx out of range (test_size={test_size})")
-    expect(not (global_q & global_demo),
-           "global_test_query disjoint from global_demo_idx",
-           f"test queries overlap global demos n={len(global_q & global_demo)}")
+    # SMELL 3 check_partition FIXED — global_test_query_idx 属 test split、global_demo_idx 属 train split，idx 空间不同，不可做数值交集比较
 
     log(f"[check] fallback/reuse counters: {json.dumps(meta.get('fallback_reuse', {}), ensure_ascii=False)}")
     client_reuse = int(meta.get("fallback_reuse", {}).get("total_client_reuse", 0))

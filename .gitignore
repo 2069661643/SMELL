@@ -1,6 +1,7 @@
 # runtime artifacts — never commit
 checkpoints/
 dataset/
+dataset_v3/
 logs/
 temp/
 

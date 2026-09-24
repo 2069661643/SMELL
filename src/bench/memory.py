@@ -32,6 +32,8 @@ def parse_args():
                         help='filter, e.g. "sparse=1,dense=0;lora=attn;ckpt=1"')
     parser.add_argument("--cap-fraction", type=float, default=0.9)
     parser.add_argument("--steps", type=int, default=1)
+    parser.add_argument("--mode", choices=("forward", "backward"), default="forward",
+                        help="forward = ZOO 主线显存；backward = BP 对照（16k 8GB 会 OOM）")
     parser.add_argument("--out", default=None, help="JSON output path")
     return parser.parse_args()
 
@@ -87,7 +89,8 @@ def condition_match(combo, key, value):
 
 
 def combo_matches(combo, groups):
-    return all(any(condition_match(combo, key, value) for key, value in group) for group in groups)
+    # SMELL 3 memory FIXED — 组内 AND、组间 OR（首版写成组内 OR，--only 失效）
+    return any(all(condition_match(combo, key, value) for key, value in group) for group in groups)
 
 
 def run_combo(combo, args):
@@ -118,7 +121,8 @@ def run_combo(combo, args):
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         for _ in range(args.steps):
             loss = model(input_ids, labels=input_ids).loss
-            loss.backward()
+            if args.mode == "backward":
+                loss.backward()
     torch.cuda.synchronize()
     elapsed = time.time() - started
     peak_allocated = torch.cuda.max_memory_allocated()
@@ -127,6 +131,7 @@ def run_combo(combo, args):
     record = dict(combo)
     record.update({
         "status": "ok",
+        "mode": args.mode,
         "seq_len": args.seq_len,
         "steps": args.steps,
         "loss": float(loss.detach().cpu()),
@@ -169,21 +174,28 @@ def main():
             gc.collect()
             torch.cuda.empty_cache()
         records.append(record)
-        peak = record["peak_allocated_gb"]
-        free_before = record["free_before_gb"]
-        free_after = record["free_after_gb"]
-        elapsed = record["elapsed_s"]
-        print(f"{str(combo['sparse']):<8}{combo['lora']:<9}{str(combo['ckpt']):<6}{record['status'][:9]:<10}"
-              f"{peak if peak is None else round(peak, 2):>10}"
-              f"{free_before if free_before is None else round(free_before, 2):>13}"
-              f"{free_after if free_after is None else round(free_after, 2):>12}"
-              f"{elapsed if elapsed is None else round(elapsed, 2):>9}")
+        print(f"[memory] {combo['sparse']} {combo['lora']} ckpt={combo['ckpt']} -> "
+              f"{record['status'][:120]}", flush=True)
 
     if args.out:
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(records, indent=2), encoding="utf-8")
         print(f"[memory] wrote {out_path}")
+
+    def cell(value, digits=2):
+        # SMELL 3 memory FIXED — None 字段不能直接套格式符（首版在此崩溃）
+        return "-" if value is None else round(value, digits)
+
+    print(f"{'sparse':<8}{'lora':<9}{'ckpt':<6}{'status':<10}"
+          f"{'peak_GiB':>10}{'free_before':>13}{'free_after':>12}{'time_s':>9}")
+    for record in records:
+        print(f"{str(record['sparse']):<8}{record['lora']:<9}{str(record['ckpt']):<6}"
+              f"{str(record['status'])[:9]:<10}"
+              f"{cell(record['peak_allocated_gb']):>10}"
+              f"{cell(record['free_before_gb']):>13}"
+              f"{cell(record['free_after_gb']):>12}"
+              f"{cell(record['elapsed_s']):>9}")
 
 
 if __name__ == "__main__":
