@@ -197,6 +197,9 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx):
         "--sparse", str(args.sparse),
         "--out", str(eval_out),
     ]
+    # SMELL 3 run_fed eval pos_checkpoint ADD — 评测须加载同一 pos_embed，否则位置表错位导致 G-PPL 失真
+    if getattr(args, "pos_checkpoint", None):
+        command += ["--pos-checkpoint", str(args.pos_checkpoint)]
     proc = subprocess.run(command, cwd=str(REPO), capture_output=True, text=True)
     if proc.returncode != 0 or not eval_out.exists():
         append_metrics(metrics_path, {
