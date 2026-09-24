@@ -136,7 +136,26 @@ class OPTAttention(nn.Module):
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=self.enable_bias)
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=self.enable_bias)
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=self.enable_bias)
-        self.predictor = PrunableAttnPredictorInfer(dim=int(config.hidden_size/config.num_attention_heads), hidden_dim=128, n_head=config.num_attention_heads)
+        # SMELL 3 modeling_opt_smell predictor_layers BEGIN — 上游 OPTAttention 忽略 config.predictor_layers（llama 路径已支持），
+        # 这里按 pruned_config 的逐层 outdim 重建剪枝后的 predictor 形状；无配置时退回默认（未剪枝）形状。
+        predictor_kwargs = {}
+        predictor_layers = getattr(config, "predictor_layers", None)
+        if predictor_layers is not None and layer_idx is not None:
+            layer_cfg = predictor_layers[layer_idx]
+            if layer_cfg:
+                predictor_kwargs = {
+                    "q1_outdim": layer_cfg["q1_outdim"],
+                    "q2_outdim": layer_cfg["q2_outdim"],
+                    "k1_outdim": layer_cfg["k1_outdim"],
+                    "k2_outdim": layer_cfg["k2_outdim"],
+                }
+        self.predictor = PrunableAttnPredictorInfer(
+            dim=int(config.hidden_size / config.num_attention_heads),
+            hidden_dim=128,
+            n_head=config.num_attention_heads,
+            **predictor_kwargs,
+        )
+        # SMELL 3 modeling_opt_smell predictor_layers END
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 

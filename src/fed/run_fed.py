@@ -52,6 +52,11 @@ def parse_args():
     # SMELL 3 run_fed init-path ADD — warmup 产物初始化：位置表 + LoRA 适配器（云端 Step 3/4 复用）
     parser.add_argument("--pos-checkpoint", default=None, help="pos_embed.pt loaded into embed_positions BEFORE LoRA")
     parser.add_argument("--adapter-init", default=None, help="PEFT adapter dir used to initialize LoRA (kept trainable)")
+    # SMELL 3 run_fed predictor ADD — predictor.pth + pruned_config.pth 接线（None = 不加载，保持随机初始化）
+    parser.add_argument("--predictor", default=None,
+                        help="predictor.pth (Jenga PrunableAttnPredictorInfer weights); requires --pruned-config")
+    parser.add_argument("--pruned-config", default=None,
+                        help="pruned_config.pth (per-layer q/k outdims) used to rebuild predictor shapes")
     # SMELL 3 run_fed act_pack ADD — BP 默认旁路 Jenga 半丢弃 hooks（避免梯度静默污染）；ZOO 不受影响
     parser.add_argument("--act-pack", choices=("off", "on"), default="off")
     parser.add_argument("--eval-every", type=int, default=0, help="0 = off; else run ppl.py every N rounds")
@@ -62,6 +67,41 @@ def parse_args():
 def resolve(path):
     path = Path(path)
     return path if path.is_absolute() else REPO / path
+
+
+# SMELL 3 run_fed predictor BEGIN — 把 predictor.pth 的逐层 q/k 线性权重拷入模型 self_attn.predictor
+def load_predictor_weights(model, path):
+    """按 key 把 predictor.pth 载入模型（形状须与 --pruned-config 重建的 predictor 一致）。
+
+    上游 Jenga 约定（llama_jenga.py / hello_world.py）：predictor.pth 键名与
+    `model.decoder.layers.N.self_attn.predictor.*` 一致，逐键 copy_ 进 state_dict。
+    形状不匹配（例如未按 pruned_config 重建）直接报错，避免静默加载随机权重。
+    """
+    import torch
+    state = torch.load(path, map_location="cpu")
+    assert isinstance(state, dict), f"predictor payload is {type(state).__name__}, expected dict"
+    model_state = model.state_dict()
+    loaded, skipped, mismatched = 0, 0, []
+    with torch.no_grad():
+        for key, value in state.items():
+            if key not in model_state:
+                skipped += 1
+                continue
+            target = model_state[key]
+            if tuple(target.shape) != tuple(value.shape):
+                mismatched.append((key, tuple(value.shape), tuple(target.shape)))
+                continue
+            target.copy_(value.to(device=target.device, dtype=target.dtype))
+            loaded += 1
+    if mismatched:
+        raise RuntimeError(
+            f"predictor shape mismatch for {len(mismatched)} tensors, e.g. {mismatched[:3]}; "
+            f"--pruned-config must match --predictor")
+    if loaded == 0:
+        raise RuntimeError(f"predictor loaded 0 tensors from {path}; check key prefixes")
+    print(f"[fed] predictor loaded tensors={loaded} skipped={skipped} path={path}")
+    return loaded, skipped
+# SMELL 3 run_fed predictor END
 
 
 def discover_clients(data_root, tag, max_clients=0):
@@ -186,6 +226,10 @@ def main():
         if args.sparse + catv_r > 1.0 + 1e-9:
             raise SystemExit(f"CATV requires s + r <= 1, got s={args.sparse} r={catv_r}")
 
+    # SMELL 3 run_fed predictor ADD — predictor/pruned-config 必须成对提供
+    if bool(args.predictor) != bool(args.pruned_config):
+        raise SystemExit("--predictor and --pruned-config must be provided together")
+
     import torch
     # SMELL 3 run_fed imports MODIFIED — 使用 src/ 可编辑的 OPT 拷贝（含 CATV 掩码注入）
     from src.models.modeling_opt_smell import OPTForCausalLM
@@ -229,7 +273,19 @@ def main():
 
     config = get_opt_qk(model_name=args.model_dir, flash_attention=True, pool_size=64,
                         thresh=args.sparse)
+    # SMELL 3 run_fed predictor BEGIN — 载入 pruned_config 并在建模前挂到 config（OPTAttention 据此重建剪枝形状）
+    predictor_loaded = 0
+    if args.predictor:
+        pruned_path = resolve(args.pruned_config)
+        pruned_payload = torch.load(pruned_path, map_location="cpu")
+        assert isinstance(pruned_payload, dict) and "layers" in pruned_payload, (
+            f"unsupported pruned_config payload from {pruned_path}")
+        config.predictor_layers = pruned_payload["layers"]
+        print(f"[fed] pruned_config loaded path={pruned_path} layers={len(config.predictor_layers)}")
     model = OPTForCausalLM.from_pretrained(args.model_dir, torch_dtype=torch.bfloat16, config=config)
+    if args.predictor:
+        predictor_loaded, _ = load_predictor_weights(model, resolve(args.predictor))
+    # SMELL 3 run_fed predictor END
     # SMELL 3 run_fed base_config ADD — 保存 LoRA 包装前的 OPTConfig 引用（vote_callback/consensus_mask 挂载点）
     base_config = model.config
     model = ensure_positions(model, effective_seq_len)
@@ -287,6 +343,10 @@ def main():
         "effective_seq_len": effective_seq_len,
         "resolved_pos_checkpoint": str(resolve(args.pos_checkpoint)) if args.pos_checkpoint else None,
         "resolved_adapter_init": str(resolve(args.adapter_init)) if args.adapter_init else None,
+        # SMELL 3 run_fed predictor config ADD — predictor 加载路径与已载入张量数（可复现性）
+        "resolved_predictor": str(resolve(args.predictor)) if args.predictor else None,
+        "resolved_pruned_config": str(resolve(args.pruned_config)) if args.pruned_config else None,
+        "predictor_loaded_tensors": predictor_loaded,
         "torch_version": torch.__version__,
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
     }
