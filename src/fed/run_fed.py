@@ -18,6 +18,8 @@ if str(REPO) not in sys.path:
 
 DEFAULT_MODEL_DIR = REPO / "third_party" / "Jenga" / "checkpoints" / "opt-350m"
 LORA_TARGETS = ["q_proj", "k_proj", "v_proj", "out_proj"]
+# SMELL 3 CATV block size ADD — Jenga pool_size（16k / 64 = 256 块/层）
+BLOCK_SIZE = 64
 
 
 def parse_args():
@@ -31,6 +33,11 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--weight", choices=("samples", "equal"), default="samples")
     parser.add_argument("--catv", choices=("on", "off"), default="off")
+    # SMELL 3 run_fed catv args ADD — CATV anchor ratio r（默认 sparse/2）与投票归一化方式
+    parser.add_argument("--catv-r", type=float, default=None,
+                        help="CATV anchor ratio r; default None => sparse/2 (requires r < s and s + r <= 1)")
+    parser.add_argument("--catv-normalize", choices=("off", "sum"), default="off",
+                        help="off = raw summed votes (paper); sum = each client per-layer vote / its sum (v2 legacy)")
     parser.add_argument("--sparse", type=float, default=0.4)
     parser.add_argument("--gpu", default=None, help="sets CUDA_VISIBLE_DEVICES before importing torch")
     parser.add_argument("--max-clients", type=int, default=0)
@@ -152,18 +159,25 @@ def main():
     args = parse_args()
     if args.gpu is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
-    if args.catv == "on":
-        raise SystemExit(
-            "CATVSelector is not implemented yet (placeholder in src/models/token_selector.py) — "
-            "run with --catv off for now"
-        )
+    # SMELL 3 run_fed catv REWRITTEN — 解析/校验 CATV 锚比例（r < s 且 s + r <= 1，默认 r = s/2）
+    catv_on = args.catv == "on"
+    catv_r = None
+    if catv_on:
+        catv_r = args.catv_r if args.catv_r is not None else args.sparse / 2.0
+        if catv_r <= 0.0 or catv_r >= args.sparse:
+            raise SystemExit(f"CATV requires 0 < r < s, got r={catv_r} s={args.sparse}")
+        if args.sparse + catv_r > 1.0 + 1e-9:
+            raise SystemExit(f"CATV requires s + r <= 1, got s={args.sparse} r={catv_r}")
 
     import torch
-    from jenga.models.modeling_opt import OPTForCausalLM
+    # SMELL 3 run_fed imports MODIFIED — 使用 src/ 可编辑的 OPT 拷贝（含 CATV 掩码注入）
+    from src.models.modeling_opt_smell import OPTForCausalLM
     from jenga.utils.config_utils import get_opt_qk
 
     from src.fed.serial_fedavg import ClientRunner, ServerAggregator, append_metrics
     from src.models.position_embed import ensure_positions
+    # SMELL 3 run_fed imports ADD — CATV 服务器端掩码计算与 IR 指标
+    from src.models.token_selector import compute_consensus_mask, mask_intersection_rate
     from src.train.lora import build_lora_model, count_trainable, get_trainable_state_dict, load_trainable_state_dict
 
     random.seed(args.seed)
@@ -184,10 +198,14 @@ def main():
     first_train_ids = np.load(data_root / args.tag / "clients" / client_names[0] / "train_input_ids.npy",
                               mmap_mode="r")
     train_seq_len = int(first_train_ids.shape[1])
+    # SMELL 3 run_fed n_blocks ADD — CATV: 每层块数 N = seq_len / pool_size
+    n_blocks = train_seq_len // BLOCK_SIZE
 
     config = get_opt_qk(model_name=args.model_dir, flash_attention=True, pool_size=64,
                         thresh=args.sparse)
     model = OPTForCausalLM.from_pretrained(args.model_dir, torch_dtype=torch.bfloat16, config=config)
+    # SMELL 3 run_fed base_config ADD — 保存 LoRA 包装前的 OPTConfig 引用（vote_callback/consensus_mask 挂载点）
+    base_config = model.config
     model = ensure_positions(model, train_seq_len)
     model = build_lora_model(model, r=8, targets=LORA_TARGETS)
     model = model.cuda().train()
@@ -205,6 +223,9 @@ def main():
         "partition_counts": partition_counts,
         "trainable_params": trainable_params,
         "lora_targets": LORA_TARGETS,
+        # SMELL 3 run_fed catv config ADD — 生效的锚比例与块数
+        "resolved_catv_r": catv_r,
+        "n_blocks": n_blocks,
         "torch_version": torch.__version__,
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
     }
@@ -218,9 +239,16 @@ def main():
                       if partition_counts.get(name.replace("client_", "")) is not None)
         print(f"[fed] partition.json counts loaded for {covered}/{len(client_names)} clients")
 
+    # SMELL 3 run_fed catv round0 ADD — 第 0 轮无掩码（None），掩码由上一轮投票生成
+    consensus_mask = None
     for round_idx in range(args.rounds):
         round_started = time.time()
+        # SMELL 3 run_fed catv round start ADD — 注入上一轮掩码；回调由 ClientRunner 自行安装/移除
+        base_config.consensus_mask = consensus_mask
+        base_config.vote_callback = None
         deltas, counts, losses, client_stats = [], [], [], {}
+        round_vote_sum = {}
+        client_votes = {}
         for name in client_names:
             client_dir = data_root / args.tag / "clients" / name
             input_ids_np = np.load(client_dir / "train_input_ids.npy")
@@ -230,7 +258,8 @@ def main():
 
             load_trainable_state_dict(model, global_state)
             runner = ClientRunner(model, local_steps=args.local_steps, lr=args.lr,
-                                  zo_eps=args.zo_eps, zo_directions=args.zo_directions)
+                                  zo_eps=args.zo_eps, zo_directions=args.zo_directions,
+                                  collect_votes=catv_on)
             result = runner.run(iter_batches(input_ids_np, num_samples, model.device))
             deltas.append(result["delta"])
             counts.append(num_samples)
@@ -241,6 +270,16 @@ def main():
                 "train_loss": result["train_loss"],
                 "delta_norm": delta_norm(result["delta"]),
             }
+            # SMELL 3 run_fed catv votes ADD — 收集本轮客户端投票（可选 per-layer sum 归一化）
+            if catv_on:
+                votes = result["votes"]
+                if args.catv_normalize == "sum":
+                    votes = {
+                        layer: (tensor / tensor.sum() if float(tensor.sum()) != 0.0 else tensor)
+                        for layer, tensor in votes.items()
+                    }
+                round_vote_sum = ServerAggregator.accumulate_votes(round_vote_sum, votes)
+                client_votes[name] = votes
 
         aggregated = aggregator.aggregate(deltas, counts)
         global_state = {key: global_state[key] + aggregated[key] for key in global_state}
@@ -270,6 +309,41 @@ def main():
             "zo_directions": args.zo_directions,
             "round_seconds": time.time() - round_started,
         }
+        # SMELL 3 run_fed catv mask BEGIN — 本轮投票 → 下一轮共识锚掩码 + 掩码文件 + IR 指标
+        if catv_on:
+            consensus_mask = compute_consensus_mask(round_vote_sum, n_blocks, catv_r, args.sparse)
+            mask_path = out_dir / f"consensus_mask_round{round_idx}.pt"
+            torch.save(consensus_mask, mask_path)
+            first_layer_mask = next(iter(consensus_mask.values()))
+            anchor_in = int(torch.isposinf(first_layer_mask).sum())
+            anchor_out = int(torch.isneginf(first_layer_mask).sum())
+            local_keep = max(1, min(int(n_blocks * args.sparse), n_blocks))
+            ir_values = []
+            for votes in client_votes.values():
+                for layer, tensor in votes.items():
+                    local_order = torch.argsort(tensor, descending=True, stable=True)[:local_keep]
+                    local_set = {int(index) for index in local_order.tolist()}
+                    central_set = {
+                        int(index)
+                        for index in torch.isposinf(consensus_mask[layer]).nonzero().reshape(-1).tolist()
+                    }
+                    ir_values.append(mask_intersection_rate(local_set, central_set))
+            ir_mean = (sum(ir_values) / len(ir_values)) if ir_values else None
+            ir_min = min(ir_values) if ir_values else None
+            record.update({
+                "catv_r": catv_r,
+                "anchor_in": anchor_in,
+                "anchor_out": anchor_out,
+                "vote_bytes": len(round_vote_sum) * n_blocks * 4,
+                "ir_mean": ir_mean,
+                "ir_min": ir_min,
+                "consensus_mask_file": mask_path.name,
+            })
+            print(f"[fed] catv round {round_idx} mask={mask_path.name} anchor_in={anchor_in} "
+                  f"anchor_out={anchor_out} vote_bytes={record['vote_bytes']} "
+                  f"ir_mean={ir_mean if ir_mean is not None else float('nan'):.4f} "
+                  f"ir_min={ir_min if ir_min is not None else float('nan'):.4f}")
+        # SMELL 3 run_fed catv mask END
         append_metrics(metrics_path, record)
         print(f"[fed] round {round_idx}/{args.rounds - 1} loss={train_loss_mean} "
               f"delta_norm={record['delta_norm_mean']:.4e} "

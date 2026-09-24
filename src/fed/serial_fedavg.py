@@ -11,20 +11,74 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 
+# SMELL 3 CATV votes BEGIN — 模型 config 定位 + predictor 原始分数逐层累积器
+def resolve_model_config(model):
+    """定位 PeftModel 内部的 OPTConfig（vote_callback/consensus_mask 挂在该共享 config 上）。"""
+    candidates = [model]
+    get_base = getattr(model, "get_base_model", None)
+    if callable(get_base):
+        candidates.append(get_base())
+    base = getattr(model, "base_model", None)
+    if base is not None:
+        candidates.append(getattr(base, "model", None))
+    for candidate in candidates:
+        config = getattr(candidate, "config", None)
+        if config is not None and hasattr(config, "num_hidden_layers"):
+            return config
+    raise AttributeError(f"cannot locate model config on {type(model).__name__}")
+
+
+class _VoteAccumulator:
+    """逐层累积 CATV 块投票：每次 forward 累加 batch 维总和与行数，最后取均值。"""
+
+    def __init__(self, first_layer, last_layer):
+        self.first_layer = int(first_layer)
+        self.last_layer = int(last_layer)
+        self.sums = {}
+        self.counts = {}
+
+    def __call__(self, layer_idx, block_scores):
+        layer_idx = int(layer_idx)
+        if not (self.first_layer <= layer_idx <= self.last_layer):
+            return
+        values = block_scores.detach().float()
+        if values.dim() == 1:
+            values = values.unsqueeze(0)
+        total = values.sum(dim=0)
+        if layer_idx in self.sums:
+            self.sums[layer_idx] = self.sums[layer_idx] + total
+            self.counts[layer_idx] += int(values.size(0))
+        else:
+            self.sums[layer_idx] = total.clone()
+            self.counts[layer_idx] = int(values.size(0))
+
+    def average(self):
+        return {
+            layer: (self.sums[layer] / float(self.counts[layer])).detach().to(
+                device="cpu", dtype=torch.float32
+            ).clone()
+            for layer in sorted(self.sums)
+        }
+# SMELL 3 CATV votes END
+
+
 class ClientRunner:
     """在 model 的可训练参数上做 local_steps 次 ZOO 更新。
 
     selector（CATV/Jenga sparse）由调用方或模型内部应用，这里只保存引用。
+    collect_votes=True 时在本地训练期间收集 CATV 块投票（每次 forward，含 ZOO 中心差分两次探测）。
     """
 
     def __init__(self, model, local_steps=20, lr=1e-3, zo_eps=1e-3,
-                 zo_directions=8, selector=None):
+                 zo_directions=8, selector=None, collect_votes=False):
         self.model = model
         self.local_steps = int(local_steps)
         self.lr = float(lr)
         self.zo_eps = float(zo_eps)
         self.zo_directions = int(zo_directions)
         self.selector = selector
+        # SMELL 3 ClientRunner collect_votes ADD — CATV 投票开关
+        self.collect_votes = bool(collect_votes)
 
     def _loss_fn(self, input_ids):
         return lambda: self.model(input_ids, labels=input_ids).loss
@@ -33,38 +87,55 @@ class ClientRunner:
         from src.train.lora import get_trainable_state_dict
         from src.train.zoo import apply_flat_delta, flatten_trainable, zo_grad
 
-        names, sample_flat = flatten_trainable(self.model)
-        assert names, "model has no trainable parameters (did LoRA wrapping run?)"
-        device = sample_flat.device
-        initial = get_trainable_state_dict(self.model)
+        # SMELL 3 ClientRunner votes BEGIN — CATV: 本地训练期间安装逐层投票累积回调
+        vote_config = None
+        vote_accumulator = None
+        if self.collect_votes:
+            vote_config = resolve_model_config(self.model)
+            num_layers = int(getattr(vote_config, "num_hidden_layers"))
+            vote_accumulator = _VoteAccumulator(num_layers // 2 - 1, num_layers - 2)
+            vote_config.vote_callback = vote_accumulator
+        try:
+            names, sample_flat = flatten_trainable(self.model)
+            assert names, "model has no trainable parameters (did LoRA wrapping run?)"
+            device = sample_flat.device
+            initial = get_trainable_state_dict(self.model)
 
-        iterator = iter(input_ids_iterable)
-        losses = []
-        steps = 0
-        for _ in range(self.local_steps):
-            try:
-                input_ids = next(iterator)
-            except StopIteration:
-                break
-            if isinstance(input_ids, dict):
-                input_ids = input_ids["input_ids"]
-            input_ids = input_ids.to(device)
-            with torch.no_grad():
-                losses.append(float(self.model(input_ids, labels=input_ids).loss.detach().cpu()))
-            grad = zo_grad(self.model, self._loss_fn(input_ids), self.zo_eps, self.zo_directions)
-            grad_flat = torch.cat([grad[name].reshape(-1).float() for name in names])
-            apply_flat_delta(self.model, (-self.lr * grad_flat).to(device))
-            steps += 1
+            iterator = iter(input_ids_iterable)
+            losses = []
+            steps = 0
+            for _ in range(self.local_steps):
+                try:
+                    input_ids = next(iterator)
+                except StopIteration:
+                    break
+                if isinstance(input_ids, dict):
+                    input_ids = input_ids["input_ids"]
+                input_ids = input_ids.to(device)
+                with torch.no_grad():
+                    losses.append(float(self.model(input_ids, labels=input_ids).loss.detach().cpu()))
+                grad = zo_grad(self.model, self._loss_fn(input_ids), self.zo_eps, self.zo_directions)
+                grad_flat = torch.cat([grad[name].reshape(-1).float() for name in names])
+                apply_flat_delta(self.model, (-self.lr * grad_flat).to(device))
+                steps += 1
+        finally:
+            # SMELL 3 ClientRunner votes END — 训练结束移除回调，避免污染其它 client/轮次
+            if vote_config is not None:
+                vote_config.vote_callback = None
 
         final = get_trainable_state_dict(self.model)
         delta = {name: final[name] - initial[name] for name in initial}
-        return {
+        result = {
             "state_dict": final,
             "delta": delta,
             "train_loss": (sum(losses) / len(losses)) if losses else None,
             "steps": steps,
             "lr": self.lr,
         }
+        # SMELL 3 ClientRunner votes ADD — CATV: 返回逐层 CPU fp32 平均块投票
+        if vote_accumulator is not None:
+            result["votes"] = vote_accumulator.average()
+        return result
 
 
 class ServerAggregator:
@@ -100,6 +171,17 @@ class ServerAggregator:
         total = float(sum(counts))
         assert total > 0, "sum(counts) must be positive"
         return [float(count) / total for count in counts]
+
+    # SMELL 3 ServerAggregator accumulate_votes ADD — CATV: 逐层累加客户端投票（服务器端求和）
+    @staticmethod
+    def accumulate_votes(vote_sum, votes):
+        for layer_idx, tensor in votes.items():
+            tensor = tensor.detach().to(device="cpu", dtype=torch.float32)
+            if layer_idx in vote_sum:
+                vote_sum[layer_idx] = vote_sum[layer_idx] + tensor
+            else:
+                vote_sum[layer_idx] = tensor.clone()
+        return vote_sum
 
     def aggregate(self, state_dicts, counts=None):
         self.consistency_check(state_dicts)

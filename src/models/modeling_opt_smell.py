@@ -299,6 +299,15 @@ class OptFlashAttention2(OPTAttention):
                 hidden_states_ = hidden_states.clone()
                 predict_attn = self.predictor(hidden_states_)
                 sum_q = predict_attn.sum(dim=-2)
+                # SMELL 3 vote_callback ADD — CATV: 上报原始块分数（topk/掩码之前，无梯度）
+                vote_callback = getattr(self.config, "vote_callback", None)
+                if vote_callback is not None:
+                    vote_callback(self.layer_idx, sum_q.detach())
+                # SMELL 3 consensus_mask ADD — CATV: 服务器共识锚掩码注入原始分数（+inf 强制保留 / -inf 强制排除）
+                consensus_mask = getattr(self.config, "consensus_mask", None)
+                if consensus_mask is not None and self.layer_idx in consensus_mask:
+                    # SMELL 3 consensus_mask ADD — 掩码转至 sum_q 的 device/dtype 后相加
+                    sum_q = sum_q + consensus_mask[self.layer_idx].to(device=sum_q.device, dtype=sum_q.dtype)
                 if self.layer_idx < self.config.num_hidden_layers//2 - 1:
                     q_len_now = int(sum_q.size(1))
                 else:
