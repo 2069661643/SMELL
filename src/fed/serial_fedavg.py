@@ -73,7 +73,9 @@ class ClientRunner:
     def __init__(self, model, local_steps=20, lr=1e-3, zo_eps=1e-3,
                  zo_directions=8, selector=None, collect_votes=False,
                  # SMELL 3 ClientRunner trainer ADD — zoo=前向梯度（默认，字节兼容）；bp=标准反传本地训练
-                 trainer="zoo", bp_clip=1.0):
+                 trainer="zoo", bp_clip=1.0,
+                 # SMELL 3 ClientRunner rank_rotation ADD — 激活秩掩码/秩集合（None = 旧行为，全参数）
+                 active_index=None, active_ranks=None):
         assert trainer in ("zoo", "bp"), f"unknown trainer: {trainer}"
         self.model = model
         self.local_steps = int(local_steps)
@@ -85,13 +87,16 @@ class ClientRunner:
         self.collect_votes = bool(collect_votes)
         self.trainer = str(trainer)
         self.bp_clip = float(bp_clip)
+        # SMELL 3 ClientRunner rank_rotation ADD — 秩掩码：ZOO 子空间收缩 / BP 非激活快照-还原
+        self.active_index = active_index
+        self.active_ranks = list(active_ranks) if active_ranks is not None else None
 
     def _loss_fn(self, input_ids):
         return lambda: self.model(input_ids, labels=input_ids).loss
 
     def run(self, input_ids_iterable):
         from src.train.lora import get_trainable_state_dict
-        from src.train.zoo import apply_flat_delta, flatten_trainable, zo_grad
+        from src.train.zoo import _restore_flat, apply_flat_delta, flatten_trainable, zo_grad
 
         # SMELL 3 ClientRunner votes BEGIN — CATV: 本地训练期间安装逐层投票累积回调
         vote_config = None
@@ -112,6 +117,8 @@ class ClientRunner:
             if self.trainer == "bp":
                 bp_params = [param for param in self.model.parameters() if param.requires_grad]
                 optimizer = torch.optim.AdamW(bp_params, lr=self.lr, weight_decay=0.0)
+            # SMELL 3 ClientRunner rank_rotation ADD — BP: 记录初始全长，step 后把非激活位置逐位还原
+            init_full = sample_flat.clone() if self.active_index is not None else None
 
             iterator = iter(input_ids_iterable)
             losses = []
@@ -134,12 +141,24 @@ class ClientRunner:
                     if self.bp_clip > 0:
                         torch.nn.utils.clip_grad_norm_(bp_params, self.bp_clip)
                     optimizer.step()
+                    # SMELL 3 ClientRunner rank_rotation BEGIN — 非激活秩还原为初始值（AdamW 动量不漂移）
+                    if self.active_index is not None:
+                        assert init_full is not None, "active_index requires an initial snapshot"
+                        current = flatten_trainable(self.model)[1]
+                        mask = self.active_index.to(device=current.device)
+                        inactive = torch.ones(current.numel(), dtype=torch.bool, device=current.device)
+                        inactive[mask] = False
+                        current[inactive] = init_full.to(device=current.device, dtype=current.dtype)[inactive]
+                        _restore_flat(self.model, current)
+                    # SMELL 3 ClientRunner rank_rotation END
                     steps += 1
                     continue
                 # SMELL 3 ClientRunner bp END
                 with torch.no_grad():
                     losses.append(float(self.model(input_ids, labels=input_ids).loss.detach().cpu()))
-                grad = zo_grad(self.model, self._loss_fn(input_ids), self.zo_eps, self.zo_directions)
+                # SMELL 3 ClientRunner rank_rotation ADD — ZOO 只在 active_index 子空间估计/扰动
+                grad = zo_grad(self.model, self._loss_fn(input_ids), self.zo_eps, self.zo_directions,
+                               index=self.active_index)
                 grad_flat = torch.cat([grad[name].reshape(-1).float() for name in names])
                 apply_flat_delta(self.model, (-self.lr * grad_flat).to(device))
                 steps += 1
@@ -158,6 +177,8 @@ class ClientRunner:
             "lr": self.lr,
             # SMELL 3 ClientRunner trainer ADD — 记录本 client 使用的本地训练器
             "trainer": self.trainer,
+            # SMELL 3 ClientRunner rank_rotation ADD — 本轮激活秩（None = 无掩码全参数）
+            "active_ranks": sorted(self.active_ranks) if self.active_ranks is not None else None,
         }
         # SMELL 3 ClientRunner votes ADD — CATV: 返回逐层 CPU fp32 平均块投票
         if vote_accumulator is not None:

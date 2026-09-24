@@ -47,6 +47,9 @@ def parse_args():
     # SMELL 3 run_fed trainer ADD — zoo=前向梯度本地更新（默认）；bp=标准反传本地训练（Step 3 机制去风险）
     parser.add_argument("--trainer", choices=("zoo", "bp"), default="zoo")
     parser.add_argument("--bp-clip", type=float, default=1.0, help="BP grad clip norm; <=0 disables clipping")
+    # SMELL 3 run_fed rank_rotation ADD — LoRA 秩调度：all=旧行为；rotate=每轮激活 rank_k 个秩轮换；lock=固定前 rank_k 秩
+    parser.add_argument("--rank-mode", choices=("all", "rotate", "lock"), default="all")
+    parser.add_argument("--rank-k", type=int, default=1, help="每轮激活秩数（>0；rotate/lock 生效）")
     # SMELL 3 run_fed truncate ADD — smoke 用：每条训练序列只取前 N token（0 = 关闭，全长）
     parser.add_argument("--truncate", type=int, default=0, help="smoke only: train on first N tokens; 0 = full seq")
     # SMELL 3 run_fed init-path ADD — warmup 产物初始化：位置表 + LoRA 适配器（云端 Step 3/4 复用）
@@ -229,6 +232,9 @@ def main():
     # SMELL 3 run_fed predictor ADD — predictor/pruned-config 必须成对提供
     if bool(args.predictor) != bool(args.pruned_config):
         raise SystemExit("--predictor and --pruned-config must be provided together")
+    # SMELL 3 run_fed rank_rotation ADD — rank_k 必须为正
+    if args.rank_k <= 0:
+        raise SystemExit(f"--rank-k must be > 0, got {args.rank_k}")
 
     import torch
     # SMELL 3 run_fed imports MODIFIED — 使用 src/ 可编辑的 OPT 拷贝（含 CATV 掩码注入）
@@ -239,7 +245,16 @@ def main():
     from src.models.position_embed import ensure_positions
     # SMELL 3 run_fed imports ADD — CATV 服务器端掩码计算与 IR 指标
     from src.models.token_selector import compute_consensus_mask, mask_intersection_rate
-    from src.train.lora import build_lora_model, count_trainable, get_trainable_state_dict, load_trainable_state_dict
+    from src.train.lora import (
+        active_ranks_for,
+        build_lora_model,
+        count_trainable,
+        get_trainable_state_dict,
+        load_trainable_state_dict,
+        num_lora_ranks,
+    )
+    # SMELL 3 run_fed rank_rotation ADD — 秩掩码索引构造
+    from src.train.zoo import build_active_index
 
     # SMELL 3 run_fed act_pack BEGIN — BP 旁路 Jenga modeling_opt 的 pack/unpack hooks（否则后一半 token 梯度被静默置零）
     if args.trainer == "bp" and args.act_pack == "off":
@@ -323,6 +338,10 @@ def main():
     model = model.cuda().train()
     global_state = get_trainable_state_dict(model)
     trainable_params = count_trainable(model)
+    # SMELL 3 run_fed rank_rotation ADD — LoRA 秩数；rotate/lock 时校验 rank_k 不超秩数
+    num_ranks = num_lora_ranks(model)
+    if args.rank_mode != "all" and args.rank_k > num_ranks:
+        raise SystemExit(f"--rank-k={args.rank_k} exceeds LoRA num_ranks={num_ranks}")
     aggregator = ServerAggregator(args.weight)
     bytes_per_param = 2
 
@@ -335,6 +354,8 @@ def main():
         "partition_counts": partition_counts,
         "trainable_params": trainable_params,
         "lora_targets": LORA_TARGETS,
+        # SMELL 3 run_fed rank_rotation config ADD — LoRA 秩数（rank_mode/rank_k 来自 vars(args)）
+        "num_lora_ranks": num_ranks,
         # SMELL 3 run_fed catv config ADD — 生效的锚比例与块数
         "resolved_catv_r": catv_r,
         "n_blocks": n_blocks,
@@ -365,6 +386,11 @@ def main():
     consensus_mask = None
     for round_idx in range(args.rounds):
         round_started = time.time()
+        # SMELL 3 run_fed rank_rotation BEGIN — 全客户端同调度：由 round_idx 决定本轮激活秩与平坦索引
+        active_ranks = active_ranks_for(round_idx, args.rank_k, num_ranks, args.rank_mode)
+        active_index = build_active_index(model, active_ranks) if active_ranks else None
+        comm_params = int(active_index.numel()) if active_index is not None else trainable_params
+        # SMELL 3 run_fed rank_rotation END
         # SMELL 3 run_fed catv round start ADD — 注入上一轮掩码；回调由 ClientRunner 自行安装/移除
         base_config.consensus_mask = consensus_mask
         base_config.vote_callback = None
@@ -383,7 +409,9 @@ def main():
                                   zo_eps=args.zo_eps, zo_directions=args.zo_directions,
                                   collect_votes=catv_on,
                                   # SMELL 3 run_fed trainer ADD — 本地训练器与 BP 裁剪阈值
-                                  trainer=args.trainer, bp_clip=args.bp_clip)
+                                  trainer=args.trainer, bp_clip=args.bp_clip,
+                                  # SMELL 3 run_fed rank_rotation ADD — 本轮激活秩掩码
+                                  active_index=active_index, active_ranks=active_ranks)
             result = runner.run(iter_batches(input_ids_np, num_samples, model.device,
                                              truncate=args.truncate))
             deltas.append(result["delta"])
@@ -427,13 +455,18 @@ def main():
             "delta_norm_min": min(norms),
             "delta_norm_max": max(norms),
             "cos_mean_sampled": sample_pairwise_cos(deltas),
-            "communication_bytes": len(client_names) * trainable_params * bytes_per_param,
+            # SMELL 3 run_fed rank_rotation MODIFIED — 有掩码时通信量只计激活子空间
+            "communication_bytes": len(client_names) * comm_params * bytes_per_param,
             "weight": args.weight,
             "lr": args.lr,
             "local_steps": args.local_steps,
             "zo_directions": args.zo_directions,
             # SMELL 3 run_fed trainer ADD — 每条 round 记录本地训练器（zoo|bp）
             "trainer": args.trainer,
+            # SMELL 3 run_fed rank_rotation ADD — 本轮秩调度记录
+            "rank_mode": args.rank_mode,
+            "rank_k": args.rank_k,
+            "active_ranks": active_ranks,
             "round_seconds": time.time() - round_started,
         }
         # SMELL 3 run_fed catv mask BEGIN — 本轮投票 → 下一轮共识锚掩码 + 掩码文件 + IR 指标
@@ -474,7 +507,9 @@ def main():
         append_metrics(metrics_path, record)
         print(f"[fed] round {round_idx}/{args.rounds - 1} loss={train_loss_mean} "
               f"delta_norm={record['delta_norm_mean']:.4e} "
-              f"cos={record['cos_mean_sampled']} time={record['round_seconds']:.1f}s")
+              f"cos={record['cos_mean_sampled']} time={record['round_seconds']:.1f}s "
+              # SMELL 3 run_fed rank_rotation ADD — 打印本轮激活秩/通信量
+              f"active_ranks={active_ranks} comm_bytes={record['communication_bytes']}")
 
         if args.eval_every > 0 and (round_idx + 1) % args.eval_every == 0:
             run_global_eval(args, model, out_dir, metrics_path, round_idx)
