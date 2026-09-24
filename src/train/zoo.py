@@ -52,6 +52,37 @@ def build_active_index(model, active_ranks):
 # SMELL 3 zoo rank_rotation END
 
 
+# SMELL 3 zoo subspace_index BEGIN — 按层/投影名选择平坦参数子空间（块/子空间 ZO）
+def build_param_index(model, layers=None, modules=None):
+    """按参数名选择可训练参数的平坦索引子集。
+
+    `layers=[0,1,2]` 选名字含 `layers.{i}.` 的元素；`modules=[(0,"q_proj"), ...]`
+    选名字含 `layers.{i}.self_attn.{proj}.` 的元素；同时给出时取并集。
+    两者都为 None 返回 None；否则返回 CPU `torch.LongTensor`，无匹配时 `ValueError`。
+    """
+    if layers is None and modules is None:
+        return None
+    layer_keys = {int(layer) for layer in (layers or [])}
+    module_keys = {(int(layer), str(proj)) for layer, proj in (modules or [])}
+    named = _trainable_named_parameters(model)
+    assert named, "model has no trainable parameters"
+    indices = []
+    offset = 0
+    for name, param in named:
+        numel = int(param.numel())
+        by_layer = any(f"layers.{layer}." in name for layer in layer_keys)
+        by_module = any(f"layers.{layer}.self_attn.{proj}." in name for layer, proj in module_keys)
+        if by_layer or by_module:
+            indices.extend(range(offset, offset + numel))
+        offset += numel
+    if not indices:
+        raise ValueError(
+            f"build_param_index matched 0 elements for layers={layers} modules={modules}; "
+            f"trainable params={[name for name, _ in named][:8]}")
+    return torch.tensor(indices, dtype=torch.long)
+# SMELL 3 zoo subspace_index END
+
+
 def flatten_trainable(model, index=None):
     named = _trainable_named_parameters(model)
     names = [name for name, _ in named]
@@ -246,6 +277,60 @@ def _run_selftest():
     )
     _restore_flat(lora_model, before[index], index=index)
     results["masked restore roundtrip"] = bool(torch.equal(flatten_trainable(lora_model)[1], before))
+
+    # SMELL 3 zoo subspace_index ADD — build_param_index 用例：按层/投影选行并校验元素数与取值
+    def _weight_param(out_dim, in_dim, value):
+        holder = torch.nn.Module()
+        holder.weight = torch.nn.Parameter(torch.full((out_dim, in_dim), float(value)))
+        return holder
+
+    subspace_model = torch.nn.ModuleDict({
+        "embed_positions": _weight_param(4, 2, 9.0),
+        "layers": torch.nn.ModuleDict({
+            "0": torch.nn.ModuleDict({
+                "self_attn": torch.nn.ModuleDict({
+                    "q_proj": torch.nn.ModuleDict(
+                        {"lora_A": torch.nn.ModuleDict({"default": _weight_param(2, 4, 1.0)})}),
+                }),
+            }),
+            "1": torch.nn.ModuleDict({
+                "self_attn": torch.nn.ModuleDict({
+                    "q_proj": torch.nn.ModuleDict(
+                        {"lora_A": torch.nn.ModuleDict({"default": _weight_param(2, 4, 2.0)})}),
+                    "k_proj": torch.nn.ModuleDict(
+                        {"lora_A": torch.nn.ModuleDict({"default": _weight_param(2, 4, 3.0)})}),
+                }),
+            }),
+        }),
+    })
+    _, subspace_flat = flatten_trainable(subspace_model)
+    index_layer0 = build_param_index(subspace_model, layers=[0])
+    results["build_param_index layers count"] = int(index_layer0.numel()) == 8
+    results["build_param_index layers values"] = bool(torch.all(subspace_flat[index_layer0] == 1.0))
+    index_layer1 = build_param_index(subspace_model, layers=[1])
+    results["build_param_index layers multi"] = bool(
+        int(index_layer1.numel()) == 16
+        and torch.all(subspace_flat[index_layer1[:8]] == 3.0)
+        and torch.all(subspace_flat[index_layer1[8:]] == 2.0)
+    )
+    index_module = build_param_index(subspace_model, modules=[(1, "k_proj")])
+    results["build_param_index module count"] = bool(
+        int(index_module.numel()) == 8 and torch.all(subspace_flat[index_module] == 3.0))
+    index_mixed = build_param_index(subspace_model, modules=[(0, "q_proj"), (1, "k_proj")])
+    results["build_param_index module multi"] = bool(
+        int(index_mixed.numel()) == 16
+        and torch.all(subspace_flat[index_mixed[:8]] == 1.0)
+        and torch.all(subspace_flat[index_mixed[8:]] == 3.0)
+    )
+    results["build_param_index all layers count"] = int(
+        build_param_index(subspace_model, layers=[0, 1]).numel()) == 24
+    results["build_param_index none"] = build_param_index(subspace_model) is None
+    no_match_raised = False
+    try:
+        build_param_index(subspace_model, layers=[9])
+    except ValueError:
+        no_match_raised = True
+    results["build_param_index no match raises"] = no_match_raised
 
     return results
 

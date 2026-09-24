@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import random
+# SMELL 3 run_fed per_module_delta ADD — 解析参数名中的层号/投影名
+import re
 import subprocess
 import sys
 import time
@@ -50,6 +52,11 @@ def parse_args():
     # SMELL 3 run_fed rank_rotation ADD — LoRA 秩调度：all=旧行为；rotate=每轮激活 rank_k 个秩轮换；lock=固定前 rank_k 秩
     parser.add_argument("--rank-mode", choices=("all", "rotate", "lock"), default="all")
     parser.add_argument("--rank-k", type=int, default=1, help="每轮激活秩数（>0；rotate/lock 生效）")
+    # SMELL 3 run_fed subspace_zo ADD — 块/子空间 ZO：按层或投影选择激活子空间（与 rank-mode 互斥）
+    parser.add_argument("--zo-subspace", choices=("all", "layers", "modules"), default="all",
+                        help="all=全参数（旧行为）；layers=按层选；modules=按层+投影选")
+    parser.add_argument("--zo-layers", default=None, help="区间/单值列表，如 '0-2,5'（--zo-subspace layers 时必填）")
+    parser.add_argument("--zo-modules", default=None, help="<layer>.<proj> 列表，如 '0.q_proj,1.k_proj'（--zo-subspace modules 时必填）")
     # SMELL 3 run_fed truncate ADD — smoke 用：每条训练序列只取前 N token（0 = 关闭，全长）
     parser.add_argument("--truncate", type=int, default=0, help="smoke only: train on first N tokens; 0 = full seq")
     # SMELL 3 run_fed init-path ADD — warmup 产物初始化：位置表 + LoRA 适配器（云端 Step 3/4 复用）
@@ -73,6 +80,41 @@ def parse_args():
 def resolve(path):
     path = Path(path)
     return path if path.is_absolute() else REPO / path
+
+
+# SMELL 3 run_fed subspace_zo BEGIN — 解析 --zo-layers / --zo-modules 选择串
+def parse_layer_spec(spec):
+    """把 '0-2,5' 解析为升序去重的层号列表（闭区间）。空结果报错。"""
+    layers = []
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            start, end = chunk.split("-", 1)
+            layers.extend(range(int(start), int(end) + 1))
+        else:
+            layers.append(int(chunk))
+    if not layers:
+        raise SystemExit(f"--zo-layers parsed to empty list from {spec!r}")
+    return sorted(set(layers))
+
+
+def parse_module_spec(spec):
+    """把 '0.q_proj,1.k_proj' 解析为 [(layer, proj), ...]。格式错误报错。"""
+    modules = []
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        layer, _, proj = chunk.partition(".")
+        if not proj:
+            raise SystemExit(f"--zo-modules entry {chunk!r} must be <layer>.<proj>")
+        modules.append((int(layer), proj))
+    if not modules:
+        raise SystemExit(f"--zo-modules parsed to empty list from {spec!r}")
+    return modules
+# SMELL 3 run_fed subspace_zo END
 
 
 # SMELL 3 run_fed predictor BEGIN — 把 predictor.pth 的逐层 q/k 线性权重拷入模型 self_attn.predictor
@@ -173,6 +215,40 @@ def delta_norm(delta):
     return float(sum(torch.sum(tensor.float() ** 2) for tensor in delta.values()) ** 0.5)
 
 
+# SMELL 3 run_fed per_module_delta BEGIN — 逐层/逐投影拆分 client δ 的 L2 范数（诊断 LoRA 更新分布）
+_LAYER_PATTERN = re.compile(r"layers\.(\d+)\.")
+_PROJ_PATTERN = re.compile(r"self_attn\.(q_proj|k_proj|v_proj|out_proj)\.")
+
+
+def _layer_sort_key(layer):
+    return (0, int(layer)) if layer.isdigit() else (1, 0)
+
+
+def delta_norm_by_group(delta):
+    """把 `{param_name: tensor}` 的 δ 拆成（逐层, 逐投影）L2 范数。
+
+    层号取自 `layers.{i}.`，无匹配（如 embed_positions）归入 `other`；
+    投影名取自 `self_attn.{proj}.`，键形如 `0.q_proj`，无投影匹配的只进逐层结果。
+    """
+    import torch
+    sq_by_layer = {}
+    sq_by_module = {}
+    for name, tensor in delta.items():
+        sq = float(torch.sum(tensor.detach().float() ** 2))
+        layer_match = _LAYER_PATTERN.search(name)
+        layer = layer_match.group(1) if layer_match else "other"
+        sq_by_layer[layer] = sq_by_layer.get(layer, 0.0) + sq
+        proj_match = _PROJ_PATTERN.search(name)
+        if proj_match is not None and layer_match is not None:
+            key = f"{layer}.{proj_match.group(1)}"
+            sq_by_module[key] = sq_by_module.get(key, 0.0) + sq
+    return (
+        {key: sq_by_layer[key] ** 0.5 for key in sorted(sq_by_layer, key=_layer_sort_key)},
+        {key: sq_by_module[key] ** 0.5 for key in sq_by_module},
+    )
+# SMELL 3 run_fed per_module_delta END
+
+
 def sample_pairwise_cos(deltas, max_clients=5):
     import torch
     vectors = [torch.cat([delta[key].reshape(-1).float() for key in delta])
@@ -248,6 +324,20 @@ def main():
     # SMELL 3 run_fed rank_rotation ADD — rank_k 必须为正
     if args.rank_k <= 0:
         raise SystemExit(f"--rank-k must be > 0, got {args.rank_k}")
+    # SMELL 3 run_fed subspace_zo BEGIN — 子空间 ZO 参数校验、与秩轮换互斥、解析选择串
+    if args.zo_subspace != "all" and args.rank_mode != "all":
+        raise SystemExit(
+            f"--zo-subspace {args.zo_subspace} and --rank-mode {args.rank_mode} are mutually exclusive")
+    zo_layers, zo_modules = None, None
+    if args.zo_subspace == "layers":
+        if args.zo_layers is None:
+            raise SystemExit("--zo-subspace layers requires --zo-layers, e.g. '0-2,5'")
+        zo_layers = parse_layer_spec(args.zo_layers)
+    elif args.zo_subspace == "modules":
+        if args.zo_modules is None:
+            raise SystemExit("--zo-subspace modules requires --zo-modules, e.g. '0.q_proj,1.k_proj'")
+        zo_modules = parse_module_spec(args.zo_modules)
+    # SMELL 3 run_fed subspace_zo END
 
     import torch
     # SMELL 3 run_fed imports MODIFIED — 使用 src/ 可编辑的 OPT 拷贝（含 CATV 掩码注入）
@@ -267,7 +357,8 @@ def main():
         num_lora_ranks,
     )
     # SMELL 3 run_fed rank_rotation ADD — 秩掩码索引构造
-    from src.train.zoo import build_active_index
+    # SMELL 3 run_fed subspace_zo MODIFIED — 同源导入按层/投影构造的 build_param_index
+    from src.train.zoo import build_active_index, build_param_index
 
     # SMELL 3 run_fed act_pack BEGIN — BP 旁路 Jenga modeling_opt 的 pack/unpack hooks（否则后一半 token 梯度被静默置零）
     if args.trainer == "bp" and args.act_pack == "off":
@@ -358,6 +449,18 @@ def main():
     aggregator = ServerAggregator(args.weight)
     bytes_per_param = 2
 
+    # SMELL 3 run_fed subspace_zo BEGIN — 建好模型后构造固定子空间索引（跨轮不变，复用 active_index 管道）
+    subspace_index = None
+    if args.zo_subspace != "all":
+        try:
+            subspace_index = build_param_index(model, layers=zo_layers, modules=zo_modules)
+        except ValueError as error:
+            raise SystemExit(f"--zo-subspace selection failed: {error}")
+        assert subspace_index is not None and int(subspace_index.numel()) > 0, (
+            f"empty subspace index for layers={zo_layers} modules={zo_modules}")
+        print(f"[fed] zo_subspace={args.zo_subspace} active_index={int(subspace_index.numel())}")
+    # SMELL 3 run_fed subspace_zo END
+
     run_config = {
         **vars(args),
         "resolved_data_root": str(data_root),
@@ -369,6 +472,11 @@ def main():
         "lora_targets": LORA_TARGETS,
         # SMELL 3 run_fed rank_rotation config ADD — LoRA 秩数（rank_mode/rank_k 来自 vars(args)）
         "num_lora_ranks": num_ranks,
+        # SMELL 3 run_fed subspace_zo ADD — 解析后的子空间选择与实际激活元素数（可复现性）
+        "zo_subspace": args.zo_subspace,
+        "zo_layers": zo_layers,
+        "zo_modules": zo_modules,
+        "active_index_size": int(subspace_index.numel()) if subspace_index is not None else None,
         # SMELL 3 run_fed catv config ADD — 生效的锚比例与块数
         "resolved_catv_r": catv_r,
         "n_blocks": n_blocks,
@@ -402,6 +510,9 @@ def main():
         # SMELL 3 run_fed rank_rotation BEGIN — 全客户端同调度：由 round_idx 决定本轮激活秩与平坦索引
         active_ranks = active_ranks_for(round_idx, args.rank_k, num_ranks, args.rank_mode)
         active_index = build_active_index(model, active_ranks) if active_ranks else None
+        # SMELL 3 run_fed subspace_zo MODIFIED — 子空间模式覆盖固定索引；与 rank 模式互斥（rank_mode=all）
+        if subspace_index is not None:
+            active_index = subspace_index
         comm_params = int(active_index.numel()) if active_index is not None else trainable_params
         # SMELL 3 run_fed rank_rotation END
         # SMELL 3 run_fed catv round start ADD — 注入上一轮掩码；回调由 ClientRunner 自行安装/移除
@@ -430,11 +541,15 @@ def main():
             deltas.append(result["delta"])
             counts.append(num_samples)
             losses.append(result["train_loss"])
+            # SMELL 3 run_fed per_module_delta ADD — 逐层/逐投影拆解 client δ 范数
+            delta_by_layer, delta_by_module = delta_norm_by_group(result["delta"])
             client_stats[name] = {
                 "samples": num_samples,
                 "steps": result["steps"],
                 "train_loss": result["train_loss"],
                 "delta_norm": delta_norm(result["delta"]),
+                "delta_norm_by_layer": delta_by_layer,
+                "delta_norm_by_module": delta_by_module,
             }
             # SMELL 3 run_fed catv votes ADD — 收集本轮客户端投票（可选 per-layer sum 归一化）
             if catv_on:
@@ -457,6 +572,16 @@ def main():
             if valid else None
         )
         norms = [stats["delta_norm"] for stats in client_stats.values()]
+        # SMELL 3 run_fed per_module_delta ADD — 各层 δ 范数的跨 client 均值（缺失层按 0 计）
+        layer_keys = sorted(
+            {key for stats in client_stats.values() for key in stats["delta_norm_by_layer"]},
+            key=_layer_sort_key,
+        )
+        delta_norm_by_layer_mean = {
+            key: sum(stats["delta_norm_by_layer"].get(key, 0.0) for stats in client_stats.values())
+            / len(client_stats)
+            for key in layer_keys
+        }
         record = {
             "event": "round",
             "round": round_idx,
@@ -467,6 +592,8 @@ def main():
             "delta_norm_mean": sum(norms) / len(norms),
             "delta_norm_min": min(norms),
             "delta_norm_max": max(norms),
+            # SMELL 3 run_fed per_module_delta ADD — 逐层 δ 范数跨 client 均值
+            "delta_norm_by_layer_mean": delta_norm_by_layer_mean,
             "cos_mean_sampled": sample_pairwise_cos(deltas),
             # SMELL 3 run_fed rank_rotation MODIFIED — 有掩码时通信量只计激活子空间
             "communication_bytes": len(client_names) * comm_params * bytes_per_param,
