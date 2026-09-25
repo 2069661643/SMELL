@@ -57,6 +57,11 @@ def parse_args():
                         help="all=全参数（旧行为）；layers=按层选；modules=按层+投影选")
     parser.add_argument("--zo-layers", default=None, help="区间/单值列表，如 '0-2,5'（--zo-subspace layers 时必填）")
     parser.add_argument("--zo-modules", default=None, help="<layer>.<proj> 列表，如 '0.q_proj,1.k_proj'（--zo-subspace modules 时必填）")
+    # SMELL 3 run_fed zo_layer_rotate ADD — 每轮轮转激活层子空间（仅 --zo-subspace layers，与 rank-mode 互斥）
+    parser.add_argument("--zo-layer-rotate", action="store_true",
+                        help="rotate active layer set every round (requires --zo-subspace layers)")
+    parser.add_argument("--zo-layer-group", type=int, default=1,
+                        help="layers activated per round when --zo-layer-rotate (default 1)")
     # SMELL 3 run_fed truncate ADD — smoke 用：每条训练序列只取前 N token（0 = 关闭，全长）
     parser.add_argument("--truncate", type=int, default=0, help="smoke only: train on first N tokens; 0 = full seq")
     # SMELL 3 run_fed init-path ADD — warmup 产物初始化：位置表 + LoRA 适配器（云端 Step 3/4 复用）
@@ -330,13 +335,23 @@ def main():
             f"--zo-subspace {args.zo_subspace} and --rank-mode {args.rank_mode} are mutually exclusive")
     zo_layers, zo_modules = None, None
     if args.zo_subspace == "layers":
-        if args.zo_layers is None:
-            raise SystemExit("--zo-subspace layers requires --zo-layers, e.g. '0-2,5'")
-        zo_layers = parse_layer_spec(args.zo_layers)
+        # SMELL 3 run_fed zo_layer_rotate MODIFIED — rotate 模式按轮生成层集合，不需要固定 --zo-layers
+        if args.zo_layer_rotate:
+            if args.zo_layers is not None:
+                raise SystemExit("--zo-layer-rotate is incompatible with --zo-layers")
+            if args.zo_layer_group <= 0:
+                raise SystemExit(f"--zo-layer-group must be > 0, got {args.zo_layer_group}")
+        else:
+            if args.zo_layers is None:
+                raise SystemExit("--zo-subspace layers requires --zo-layers, e.g. '0-2,5'")
+            zo_layers = parse_layer_spec(args.zo_layers)
     elif args.zo_subspace == "modules":
         if args.zo_modules is None:
             raise SystemExit("--zo-subspace modules requires --zo-modules, e.g. '0.q_proj,1.k_proj'")
         zo_modules = parse_module_spec(args.zo_modules)
+    # SMELL 3 run_fed zo_layer_rotate ADD — --zo-layer-rotate 仅支持 layers 子空间（已由上一分支覆盖），显式兜底
+    if args.zo_layer_rotate and args.zo_subspace != "layers":
+        raise SystemExit("--zo-layer-rotate requires --zo-subspace layers")
     # SMELL 3 run_fed subspace_zo END
 
     import torch
@@ -451,7 +466,8 @@ def main():
 
     # SMELL 3 run_fed subspace_zo BEGIN — 建好模型后构造固定子空间索引（跨轮不变，复用 active_index 管道）
     subspace_index = None
-    if args.zo_subspace != "all":
+    # SMELL 3 run_fed zo_layer_rotate ADD — rotate 模式每轮重建索引，不预构造固定 subspace_index
+    if args.zo_subspace != "all" and not args.zo_layer_rotate:
         try:
             subspace_index = build_param_index(model, layers=zo_layers, modules=zo_modules)
         except ValueError as error:
@@ -460,6 +476,13 @@ def main():
             f"empty subspace index for layers={zo_layers} modules={zo_modules}")
         print(f"[fed] zo_subspace={args.zo_subspace} active_index={int(subspace_index.numel())}")
     # SMELL 3 run_fed subspace_zo END
+    # SMELL 3 run_fed zo_layer_rotate BEGIN — OPT 层数（轮转取模基准）与轮转集合计算
+    num_layers = int(resolve_model_config(model).num_hidden_layers)
+
+    def rotated_layers_for(round_idx):
+        return sorted({(round_idx * args.zo_layer_group + offset) % num_layers
+                       for offset in range(args.zo_layer_group)})
+    # SMELL 3 run_fed zo_layer_rotate END
 
     run_config = {
         **vars(args),
@@ -477,6 +500,10 @@ def main():
         "zo_layers": zo_layers,
         "zo_modules": zo_modules,
         "active_index_size": int(subspace_index.numel()) if subspace_index is not None else None,
+        # SMELL 3 run_fed zo_layer_rotate config ADD — 层轮转参数与层数（可复现性）
+        "zo_layer_rotate": args.zo_layer_rotate,
+        "zo_layer_group": args.zo_layer_group,
+        "num_layers": num_layers,
         # SMELL 3 run_fed catv config ADD — 生效的锚比例与块数
         "resolved_catv_r": catv_r,
         "n_blocks": n_blocks,
@@ -513,6 +540,16 @@ def main():
         # SMELL 3 run_fed subspace_zo MODIFIED — 子空间模式覆盖固定索引；与 rank 模式互斥（rank_mode=all）
         if subspace_index is not None:
             active_index = subspace_index
+        # SMELL 3 run_fed zo_layer_rotate BEGIN — 本轮轮转层集合及其 ZO 平坦索引（每轮重建）
+        round_active_layers = None
+        if args.zo_layer_rotate:
+            round_active_layers = rotated_layers_for(round_idx)
+            active_index = build_param_index(model, layers=round_active_layers)
+            assert active_index is not None and int(active_index.numel()) > 0, (
+                f"empty rotated layer index for layers={round_active_layers}")
+        elif args.zo_subspace == "layers":
+            round_active_layers = zo_layers
+        # SMELL 3 run_fed zo_layer_rotate END
         comm_params = int(active_index.numel()) if active_index is not None else trainable_params
         # SMELL 3 run_fed rank_rotation END
         # SMELL 3 run_fed catv round start ADD — 注入上一轮掩码；回调由 ClientRunner 自行安装/移除
@@ -594,6 +631,8 @@ def main():
             "delta_norm_max": max(norms),
             # SMELL 3 run_fed per_module_delta ADD — 逐层 δ 范数跨 client 均值
             "delta_norm_by_layer_mean": delta_norm_by_layer_mean,
+            # SMELL 3 run_fed zo_layer_rotate ADD — 本轮实际激活层（rotate=轮转集合；固定 layers=zo_layers）
+            "zo_active_layers": round_active_layers,
             "cos_mean_sampled": sample_pairwise_cos(deltas),
             # SMELL 3 run_fed rank_rotation MODIFIED — 有掩码时通信量只计激活子空间
             "communication_bytes": len(client_names) * comm_params * bytes_per_param,
@@ -649,7 +688,9 @@ def main():
               f"delta_norm={record['delta_norm_mean']:.4e} "
               f"cos={record['cos_mean_sampled']} time={record['round_seconds']:.1f}s "
               # SMELL 3 run_fed rank_rotation ADD — 打印本轮激活秩/通信量
-              f"active_ranks={active_ranks} comm_bytes={record['communication_bytes']}")
+              f"active_ranks={active_ranks} comm_bytes={record['communication_bytes']} "
+              # SMELL 3 run_fed zo_layer_rotate ADD — 打印本轮激活层（rotate 核对用）
+              f"active_layers={round_active_layers}")
 
         if args.eval_every > 0 and (round_idx + 1) % args.eval_every == 0:
             run_global_eval(args, model, out_dir, metrics_path, round_idx)
