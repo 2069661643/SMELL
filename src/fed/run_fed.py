@@ -62,6 +62,9 @@ def parse_args():
                         help="rotate active layer set every round (requires --zo-subspace layers)")
     parser.add_argument("--zo-layer-group", type=int, default=1,
                         help="layers activated per round when --zo-layer-rotate (default 1)")
+    # SMELL 3 run_fed zo_layer_count ADD — 仅在“前 N 层”内轮转（0=全部层）
+    parser.add_argument("--zo-layer-count", type=int, default=0,
+                        help="rotate over the first N layers only (0 = all; requires --zo-layer-rotate)")
     # SMELL 3 run_fed truncate ADD — smoke 用：每条训练序列只取前 N token（0 = 关闭，全长）
     parser.add_argument("--truncate", type=int, default=0, help="smoke only: train on first N tokens; 0 = full seq")
     # SMELL 3 run_fed init-path ADD — warmup 产物初始化：位置表 + LoRA 适配器（云端 Step 3/4 复用）
@@ -479,8 +482,13 @@ def main():
     # SMELL 3 run_fed zo_layer_rotate BEGIN — OPT 层数（轮转取模基准）与轮转集合计算
     num_layers = int(resolve_model_config(model).num_hidden_layers)
 
+    # SMELL 3 run_fed zo_layer_count ADD — 轮转模数取 count（>0 则只在前 count 层内轮转）
+    rotate_count = int(args.zo_layer_count) if args.zo_layer_count > 0 else num_layers
+    if rotate_count > num_layers:
+        raise SystemExit(f"--zo-layer-count={rotate_count} exceeds num_layers={num_layers}")
+
     def rotated_layers_for(round_idx):
-        return sorted({(round_idx * args.zo_layer_group + offset) % num_layers
+        return sorted({(round_idx * args.zo_layer_group + offset) % rotate_count
                        for offset in range(args.zo_layer_group)})
     # SMELL 3 run_fed zo_layer_rotate END
 
@@ -503,6 +511,7 @@ def main():
         # SMELL 3 run_fed zo_layer_rotate config ADD — 层轮转参数与层数（可复现性）
         "zo_layer_rotate": args.zo_layer_rotate,
         "zo_layer_group": args.zo_layer_group,
+        "zo_layer_count": args.zo_layer_count,
         "num_layers": num_layers,
         # SMELL 3 run_fed catv config ADD — 生效的锚比例与块数
         "resolved_catv_r": catv_r,
