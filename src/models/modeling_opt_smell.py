@@ -442,9 +442,73 @@ class OptFlashAttention2(OPTAttention):
         return attn_output, attn_weights_reshaped, past_key_value
 
 
+class OptSdpaAttention(OPTAttention):
+    """
+    # SMELL 3 modeling_opt_smell sdpa ADD — PyTorch SDPA 注意力路径：复用 OPTAttention 的 q/k/v/out 投影与 LoRA
+    # 逻辑，用 F.scaled_dot_product_attention(is_causal=True) 取代手工 causal mask + softmax + bmm，支持 fp32
+    # 并走 mem-efficient 后端（O(seq) 显存），bf16/fp16 亦可用。dense（不接 Jenga 稀疏/predictor）。
+    """
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        key_value_states: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        layer_head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        """Input shape: Batch x Time x Channel"""
+
+        # SMELL 3 modeling_opt_smell sdpa ADD — cross-attention 与 OPTAttention 语义保持一致
+        is_cross_attention = key_value_states is not None
+        bsz, tgt_len, _ = hidden_states.size()
+
+        # SMELL 3 modeling_opt_smell sdpa ADD — 注意：缩放由 SDPA 内部按 head_dim 完成，故此处的 q_proj 不再预先乘 scaling
+        query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz)
+        if is_cross_attention and past_key_value is not None:
+            key_states = past_key_value[0]
+            value_states = past_key_value[1]
+        elif is_cross_attention:
+            src_len = key_value_states.size(1)
+            key_states = self._shape(self.k_proj(key_value_states), src_len, bsz)
+            value_states = self._shape(self.v_proj(key_value_states), src_len, bsz)
+        elif past_key_value is not None:
+            key_states = self._shape(self.k_proj(hidden_states), tgt_len, bsz)
+            value_states = self._shape(self.v_proj(hidden_states), tgt_len, bsz)
+            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+        else:
+            key_states = self._shape(self.k_proj(hidden_states), tgt_len, bsz)
+            value_states = self._shape(self.v_proj(hidden_states), tgt_len, bsz)
+
+        if self.is_decoder:
+            past_key_value = (key_states, value_states)
+
+        # SMELL 3 modeling_opt_smell sdpa ADD — is_causal 仅在 decoder 自注意力且 q_len==k_len 时使用（训练 full-seq）
+        is_causal = bool(self.is_causal and not is_cross_attention and tgt_len == key_states.shape[-2])
+        attn_output = nn.functional.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            attn_mask=None,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=is_causal,
+        )
+
+        attn_output = attn_output.transpose(1, 2).reshape(bsz, tgt_len, self.embed_dim)
+        attn_output = self.out_proj(attn_output)
+
+        # SMELL 3 modeling_opt_smell sdpa ADD — SDPA 不暴露注意力权重；保持三元组接口，权重占位为 None
+        attn_weights_reshaped = None
+
+        return attn_output, attn_weights_reshaped, past_key_value
+
+
 OPT_ATTENTION_CLASSES = {
     "eager": OPTAttention,
     "flash_attention_2": OptFlashAttention2,
+    "sdpa": OptSdpaAttention,
 }
 
 
@@ -574,6 +638,7 @@ class OPTPreTrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["OPTDecoderLayer"]
     _supports_flash_attn_2 = True
+    _supports_sdpa = True  # SMELL 3 modeling_opt_smell sdpa ADD — 声明支持 config.attn_implementation="sdpa"
 
     def _init_weights(self, module):
         std = self.config.init_std
@@ -690,6 +755,7 @@ class OPTDecoder(OPTPreTrainedModel):
 
         self.layers = nn.ModuleList([OPTDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self._use_flash_attention_2 = config.attn_implementation == "flash_attention_2"
+        self._use_sdpa = config.attn_implementation == "sdpa"  # SMELL 3 modeling_opt_smell sdpa ADD
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -788,8 +854,9 @@ class OPTDecoder(OPTPreTrainedModel):
         mask_seq_length = past_key_values_length + seq_length
 
         # embed positions
-        if self._use_flash_attention_2:
+        if self._use_flash_attention_2 or self._use_sdpa:
             # 2d mask is passed through the layers
+            # SMELL 3 modeling_opt_smell sdpa ADD — sdpa 与 flash 一样只传 2d mask，避免构造 O(seq^2) 的 4d causal mask
             causal_attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
             attention_mask = (
                 torch.ones(batch_size, mask_seq_length, device=inputs_embeds.device)
