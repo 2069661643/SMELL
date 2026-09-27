@@ -446,8 +446,79 @@ class OptSdpaAttention(OPTAttention):
     """
     # SMELL 3 modeling_opt_smell sdpa ADD — PyTorch SDPA 注意力路径：复用 OPTAttention 的 q/k/v/out 投影与 LoRA
     # 逻辑，用 F.scaled_dot_product_attention(is_causal=True) 取代手工 causal mask + softmax + bmm，支持 fp32
-    # 并走 mem-efficient 后端（O(seq) 显存），bf16/fp16 亦可用。dense（不接 Jenga 稀疏/predictor）。
+    # 并走 mem-efficient 后端（O(seq) 显存），bf16/fp16 亦可用。
+    # SMELL 3 modeling_opt_smell sdpa_sparse ADD — 当 config.thresh ∈ (0,1) 且 full-seq self-attn 时，
+    # 按 pool_size 分块、每 query 块保留 top-k 个 causal KV 块（k=int(n_blocks*thresh)，Jenga 同口径），
+    # 块分优先取 Jenga predictor 分数（(bsz,n_blocks,n_blocks)），失败退化为 q·k 块均值打分；
+    # 其余 token 位置加 -inf 掩码后仍走同一个 F.scaled_dot_product_attention。thresh<=0/非法/past/cross → dense。
     """
+
+    def _build_sparse_attn_mask(self, hidden_states, query_states, key_states, bsz, tgt_len):
+        # SMELL 3 modeling_opt_smell sdpa_sparse ADD — 返回 (bsz,1,L,L) 加性掩码；不满足稀疏条件返回 None（dense 退路）
+        pool = int(getattr(self.config, "pool_size", 64))
+        thresh = getattr(self.config, "thresh", None)
+        if thresh is None or not (0.0 < float(thresh) < 1.0):
+            return None
+        if pool <= 0 or tgt_len % pool != 0:
+            return None
+        src_len = key_states.shape[-2]
+        if src_len != tgt_len:
+            return None
+        n_blocks = tgt_len // pool
+        if n_blocks < 2:
+            return None
+
+        device = query_states.device
+        with torch.no_grad():
+            # SMELL 3 modeling_opt_smell sdpa_sparse ADD — 块分优先 predictor；形状不符/不可用则 q·k 块均值退化
+            scores = None
+            scored_by = "qk_block_mean"
+            try:
+                hidden = hidden_states if hidden_states.is_contiguous() else hidden_states.contiguous()
+                predict_attn = self.predictor(hidden)
+                if predict_attn.dim() == 3 and tuple(predict_attn.shape[-2:]) == (n_blocks, n_blocks):
+                    scores = predict_attn
+                    scored_by = "predictor"
+            except RuntimeError:
+                scores = None
+            if scores is None:
+                q_block = query_states.view(bsz, self.num_heads, n_blocks, pool, self.head_dim).mean(dim=3)
+                k_block = key_states.view(bsz, self.num_heads, n_blocks, pool, self.head_dim).mean(dim=3)
+                scores = torch.einsum("bhid,bhjd->bij", q_block, k_block)
+            scores = scores.reshape(bsz, n_blocks, n_blocks).float()
+
+            # SMELL 3 modeling_opt_smell sdpa_sparse ADD — 仅在 causal 候选块内 top-k，保证每行至少 1 个可见 key
+            block_idx = torch.arange(n_blocks, device=device)
+            causal_blocks = block_idx[:, None] >= block_idx[None, :]
+            scores = scores.masked_fill(~causal_blocks[None], float("-inf"))
+            k = min(max(1, int(n_blocks * float(thresh))), n_blocks)
+            top_idx = torch.topk(scores, k, dim=-1).indices
+            allowed = torch.zeros(bsz, n_blocks, n_blocks, dtype=torch.bool, device=device)
+            allowed.scatter_(2, top_idx, True)
+            allowed &= causal_blocks[None]
+
+            # SMELL 3 modeling_opt_smell sdpa_sparse ADD — 块级 keep 展开到 token 级并与 token causal 相交
+            allowed_tok = allowed.view(bsz, n_blocks, 1, n_blocks, 1).expand(
+                bsz, n_blocks, pool, n_blocks, pool).reshape(bsz, 1, tgt_len, tgt_len)
+            token_causal = torch.ones(tgt_len, tgt_len, dtype=torch.bool, device=device).tril()[None, None]
+            keep = allowed_tok & token_causal
+            mask = torch.full((bsz, 1, tgt_len, tgt_len), float("-inf"),
+                              dtype=query_states.dtype, device=device)
+            mask.masked_fill_(keep, 0.0)
+
+            if getattr(self.config, "sdpa_sparse_debug", False):
+                per_q = allowed.sum(dim=-1)
+                self.last_sparse_stats = {
+                    "scored_by": scored_by,
+                    "n_blocks": int(n_blocks),
+                    "k": int(k),
+                    "allowed_blocks_mean": float(per_q.float().mean()),
+                    "allowed_blocks_min": int(per_q.min()),
+                    "allowed_blocks_max": int(per_q.max()),
+                    "token_keep_frac": float(keep.sum()) / float(keep.numel()),
+                    "mask_shape": list(mask.shape),
+                }
+        return mask
 
     def forward(
         self,
@@ -482,18 +553,24 @@ class OptSdpaAttention(OPTAttention):
             key_states = self._shape(self.k_proj(hidden_states), tgt_len, bsz)
             value_states = self._shape(self.v_proj(hidden_states), tgt_len, bsz)
 
+        had_past = past_key_value is not None
         if self.is_decoder:
             past_key_value = (key_states, value_states)
 
         # SMELL 3 modeling_opt_smell sdpa ADD — is_causal 仅在 decoder 自注意力且 q_len==k_len 时使用（训练 full-seq）
         is_causal = bool(self.is_causal and not is_cross_attention and tgt_len == key_states.shape[-2])
+        # SMELL 3 modeling_opt_smell sdpa_sparse ADD — full-seq self-attn 时构建块级 top-k 掩码（含 causal）；
+        # 掩码非空则 is_causal=False（causal 已编码进 mask），否则保持原 dense is_causal 路径
+        attn_mask = None
+        if is_causal and not had_past:
+            attn_mask = self._build_sparse_attn_mask(hidden_states, query_states, key_states, bsz, tgt_len)
         attn_output = nn.functional.scaled_dot_product_attention(
             query_states,
             key_states,
             value_states,
-            attn_mask=None,
+            attn_mask=attn_mask,
             dropout_p=self.dropout if self.training else 0.0,
-            is_causal=is_causal,
+            is_causal=is_causal and attn_mask is None,
         )
 
         attn_output = attn_output.transpose(1, 2).reshape(bsz, tgt_len, self.embed_dim)
@@ -505,10 +582,141 @@ class OptSdpaAttention(OPTAttention):
         return attn_output, attn_weights_reshaped, past_key_value
 
 
+class OptSdpaSparseGatherAttention(OptSdpaAttention):
+    """
+    # SMELL 3 modeling_opt_smell sparse_gather ADD — 实验用「gather 式块稀疏」注意力：不再构造 L×L 掩码，
+    # 而是先用 predictor（退化 q·k 块均值）得到块分 S[b, n_qblk, n_kvblk]，对每个 query 块只 top-k 个 causal KV 块，
+    # 再用 torch.gather 把被选 KV 块的 token 收集成 [b, h, k·pool, dh]，在 pool × (k·pool) 小块上算 SDPA；
+    # 每个 query 块用 torch.utils.checkpoint 包裹以限 BP 激活显存。thresh<=0/非法/cross/past/长度不整除 → 回退 dense。
+    """
+
+    @staticmethod
+    def _sdpa_gather_chunk(query, key, value, tok, attn_mask, dropout_p, pool):
+        # SMELL 3 modeling_opt_smell sparse_gather ADD — 单个 query 块：chunk 内 gather KV token 后做 SDPA；
+        # gather 放在 checkpoint 内，BP 只保留共享的整段 K/V 与每块 token 索引，避免每块各存一份 gathered K/V
+        bsz, heads, _, head_dim = query.shape
+        g_index = tok[:, None, :, None].expand(bsz, heads, tok.shape[1], head_dim)
+        k_g = torch.gather(key, 2, g_index)
+        v_g = torch.gather(value, 2, g_index)
+        return nn.functional.scaled_dot_product_attention(
+            query, k_g, v_g, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=False
+        )
+
+    def _gather_sparse_ok(self, tgt_len):
+        # SMELL 3 modeling_opt_smell sparse_gather ADD — 判断是否走 gather 稀疏路径（thresh∈(0,1]、长度按 pool 整除、≥2 块）
+        thresh = getattr(self.config, "thresh", None)
+        pool = int(getattr(self.config, "pool_size", 64))
+        if thresh is None:
+            return False
+        try:
+            t = float(thresh)
+        except (TypeError, ValueError):
+            return False
+        if not (0.0 < t <= 1.0):
+            return False
+        if pool <= 0 or tgt_len % pool != 0:
+            return False
+        return (tgt_len // pool) >= 2
+
+    def _block_scores(self, hidden_states, query_states, key_states, bsz, pool):
+        # SMELL 3 modeling_opt_smell sparse_gather ADD — 块分优先 Jenga predictor；形状不符/不可用则 q·k 块均值退化；纯打分无梯度
+        n_blocks = query_states.shape[-2] // pool
+        scores = None
+        with torch.no_grad():
+            try:
+                hidden = hidden_states if hidden_states.is_contiguous() else hidden_states.contiguous()
+                predict_attn = self.predictor(hidden)
+                if predict_attn.dim() == 3 and tuple(predict_attn.shape[-2:]) == (n_blocks, n_blocks):
+                    scores = predict_attn.reshape(bsz, n_blocks, n_blocks).float()
+            except (RuntimeError, ValueError):
+                scores = None
+            if scores is None:
+                q_block = query_states.view(bsz, self.num_heads, n_blocks, pool, self.head_dim).mean(dim=3)
+                k_block = key_states.view(bsz, self.num_heads, n_blocks, pool, self.head_dim).mean(dim=3)
+                scores = torch.einsum("bhid,bhjd->bij", q_block, k_block).float()
+        return scores
+
+    def _gather_attention(self, hidden_states, query_states, key_states, value_states, bsz):
+        # SMELL 3 modeling_opt_smell sparse_gather ADD — 按 query 块循环 gather 被选 KV token 并在小块上算 SDPA
+        pool = int(self.config.pool_size)
+        thresh = float(self.config.thresh)
+        tgt_len = query_states.shape[-2]
+        n_blocks = tgt_len // pool
+        k_keep = max(1, int(n_blocks * thresh))
+        scores = self._block_scores(hidden_states, query_states, key_states, bsz, pool)
+        device = query_states.device
+        dtype = query_states.dtype
+        neg = torch.finfo(dtype).min
+        base = torch.arange(pool, device=device)
+        chunk_outputs = []
+        for qi in range(n_blocks):
+            # SMELL 3 modeling_opt_smell sparse_gather ADD — 每 query 块仅在 causal 候选块内 top-k（kj≤qi+1）
+            kj = min(k_keep, qi + 1)
+            cand = scores[:, qi, : qi + 1]
+            idx_q = torch.topk(cand, kj, dim=-1).indices.sort(dim=-1).values
+            tok = (idx_q[..., None] * pool + base).reshape(bsz, kj * pool)
+            q_start = qi * pool
+            q_chunk = query_states[:, :, q_start:q_start + pool, :]
+            # SMELL 3 modeling_opt_smell sparse_gather ADD — 块内 causal：future token 位置加 -inf
+            q_global = q_start + base
+            add_mask = torch.where(
+                tok[:, None, :] > q_global[None, :, None],
+                torch.full((), neg, device=device, dtype=dtype),
+                torch.zeros((), device=device, dtype=dtype),
+            )[:, None, :, :]
+            dropout_p = self.dropout if self.training else 0.0
+            if self.training and q_chunk.requires_grad:
+                # SMELL 3 modeling_opt_smell sparse_gather ADD — checkpoint 每个 chunk（含 gather），BP 时重算以限激活显存
+                out = torch.utils.checkpoint.checkpoint(
+                    OptSdpaSparseGatherAttention._sdpa_gather_chunk,
+                    q_chunk, key_states, value_states, tok, add_mask, dropout_p, pool,
+                    use_reentrant=False,
+                )
+            else:
+                out = OptSdpaSparseGatherAttention._sdpa_gather_chunk(
+                    q_chunk, key_states, value_states, tok, add_mask, dropout_p, pool
+                )
+            chunk_outputs.append(out)
+        return torch.cat(chunk_outputs, dim=2)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        key_value_states: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        layer_head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        """Input shape: Batch x Time x Channel"""
+        # SMELL 3 modeling_opt_smell sparse_gather ADD — full-seq causal self-attn 且 thresh 合法时走 gather 稀疏，否则回退父类 dense
+        is_cross_attention = key_value_states is not None
+        bsz, tgt_len, _ = hidden_states.size()
+        if (not is_cross_attention) and past_key_value is None and self._gather_sparse_ok(tgt_len):
+            query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz)
+            key_states = self._shape(self.k_proj(hidden_states), tgt_len, bsz)
+            value_states = self._shape(self.v_proj(hidden_states), tgt_len, bsz)
+            if self.is_decoder:
+                past_key_value = (key_states, value_states)
+            attn_output = self._gather_attention(hidden_states, query_states, key_states, value_states, bsz)
+            attn_output = attn_output.transpose(1, 2).reshape(bsz, tgt_len, self.embed_dim)
+            attn_output = self.out_proj(attn_output)
+            return attn_output, None, past_key_value
+        return super().forward(
+            hidden_states,
+            key_value_states=key_value_states,
+            past_key_value=past_key_value,
+            attention_mask=attention_mask,
+            layer_head_mask=layer_head_mask,
+            output_attentions=output_attentions,
+        )
+
+
 OPT_ATTENTION_CLASSES = {
     "eager": OPTAttention,
     "flash_attention_2": OptFlashAttention2,
     "sdpa": OptSdpaAttention,
+    "sdpa_gather": OptSdpaSparseGatherAttention,  # SMELL 3 modeling_opt_smell sparse_gather ADD — 实验用 gather 式块稀疏入口
 }
 
 
@@ -517,7 +725,11 @@ class OPTDecoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = config.hidden_size
 
-        self.self_attn = OPT_ATTENTION_CLASSES[config.attn_implementation](config=config, is_decoder=True ,layer_idx=layer_idx)
+        # SMELL 3 modeling_opt_smell sparse_gather ADD — config.sparse_gather=True 时用 gather 式块稀疏（attn_implementation 仍为 sdpa）
+        attn_cls = OPT_ATTENTION_CLASSES[config.attn_implementation]
+        if getattr(config, "sparse_gather", False) and config.attn_implementation == "sdpa":
+            attn_cls = OptSdpaSparseGatherAttention
+        self.self_attn = attn_cls(config=config, is_decoder=True ,layer_idx=layer_idx)
 
         self.do_layer_norm_before = config.do_layer_norm_before
         self.dropout = config.dropout
