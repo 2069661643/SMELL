@@ -52,7 +52,25 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 4. **消融**（`run_ablation_cloud.sh`）：α∈{0.1,0.3} × CATV off/on，c=30、ZOO+LoRA、16k，4 卡并发。
 5. 调参 + 出图。
 
-**已知阻塞**：ZOO 当前 `lr=1e-3` 第 2 轮即 NaN（须重调 lr/eps/directions）；CATV 需预训练 predictor 或先解决位置适配；随机 predictor 的 PPL 不能作质量依据。
+**已知阻塞 / 最新结论（ZOO 精度根因，详见 handoff `docs/ailog/260927-194011-smell-v3-handoff.md`）**：
+
+- **ZOO 长期「平在 ~32」的根因 = bf16 损失量化**（有限差分信号 ~1e-6 ≪ 损失量化台阶 0.0156），**不是维度/秩/覆盖率**。old_ailog `260914-103130` 同款（bf16 吞 LoRA 增量）。验证脚本 `temp/diag_bf16_swallow.py`。
+- **修复**：`src/models/modeling_opt_smell.py` 新增 **`OptSdpaAttention`**（fp32 `F.scaled_dot_product_attention`、O(seq)）；16k fp32 前向 2.9s、BP ~13s/样本。fp32 下 **`cos≈0.5·√(cLD/d_eff)`**（与理论吻合；bf16 仅 0.01–0.08×）。FA2 只支持 bf16/fp16，故高精度必须走 SDPA。
+- **新瓶颈 = 成本/覆盖权衡**：fp32 比 bf16 慢 ~9×；全层 ZOO 要 cos≈0.15 需大 D（~28h/轮，不可行）；「少层/层轮转（k=1）」在 **BP 下就不收敛**（仅全 24 层收敛）。
+- **稀疏口径**：`thresh` = `config.sparse` = **保留 top-40% 的 query 块**（Jenga 仅**上半层**剪、末层豁免）；`OptSdpaPruneAttention` 为其真语义（token 子集化）实现。predictor 须 `load_predictor_weights` 加载训练权重，随机 predictor 的 PPL 不能作质量依据。
+- ZOO `lr=1e-3` 第 2 轮 NaN（须重调 lr/eps/directions）。
+
+## 正在运行 / 待检查（**仅 GPU2 允许**，GPU0/1/3 他人占用）
+
+- **k 层扫描**（BP+FA2，`temp/run_bp_kscan_bg.sh`）：`k=4→k=12`，各 60 轮、lr=1e-3 → `logs/fed/bp_kscan/k{4,12}/a01/`。
+- **GPU2 串行队列**（`temp/run_after_kscan_k1_td2_bg.sh`，等 k-scan 结束后自动）：① `k=1@lr1e-3`（BP，与 A1 同口径）→ `logs/fed/bp_k1_lr1e-3`；② `TD-2'`（`sdpa_prune` fp32、layer20、加载训练后 predictor、n=10；**seq 8192→4096→2048 级联**）→ `temp/diag_cos_sparse_td2_s*.json`。
+- **检查入口**：`temp/logs/last_bp_kscan_dir.txt`、`temp/logs/last_k1_td2_dir.txt`；**读 `metrics.jsonl`（driver.log 因 Python 块缓冲会滞后）**。
+
+## 下一步（交接后优先）
+
+1. 检查上述队列：k 拐点、`k=1@lr1e-3` 是否仍平、TD-2' 稀疏 cos 与实际 seq。
+2. 据 k 扫描定「每轮覆盖多少层才收敛」的拐点；若 ZOO 无可用中间粒度 → **主线转 BP-based FL**（已有客户端数曲线 c3→26.1 / c10→22.3 / c30→21.5）。
+3. 成本缓解（若要继续 ZOO）：Jenga fused block-sparse（`ops/flash_block.py` triton）/ torch≥2.5 `flex_attention`，而非 gather 循环（已证不划算）。
 
 ## 云端环境（与 WSL 脚本**不一致**，先读再跑）
 
@@ -144,6 +162,12 @@ $PY src/fed/run_fed.py --tag a01 --gpu 1 --trainer zoo --catv off \
 
 | 文件 | 内容 |
 |---|---|
+| `docs/ailog/260927-194011-...handoff.md` | **最新交接（必读）**：ZOO 精度根因 + fp32 SDPA 修复、运行队列、下一步 |
+| `docs/ailog/260927-121756-...tc-fp32-cos-validated.md` | **TC：fp32 下 `cos≈0.5√(cLD/d)`，ZOO 打通**；成本约束 |
+| `docs/ailog/260927-130020-...thresh-verify-gather-bench-td2b1-pilotbp.md` | `thresh` 口径、token-prune gather 不划算、TD-2/先导BP |
+| `docs/ailog/260926-184900-...tb-sdpa-fp32-and-tc.md` | 新增 fp32 SDPA 注意力（16k 可行） |
+| `docs/ailog/260926-182711-...bf16-loss-quant-and-stepA-todo.md` | Step A：bf16 损失量化根因确认 |
+| `docs/ailog/260926-015115-...zo-layerrotate-negative-and-clientcount.md` | 层轮转 ZO 负结果 + BP 客户端数曲线 |
 | `docs/ailog/260924-120514-...predictor-bp-cloud-scripts.md` | 交付表、Jenga HEAD_DIM=128 bug、PEFT 正确加载、云端 5 步流程 |
 | `docs/ailog/260924-114152-...longctx-adapt-and-delivery.md` | 位置适配 B/C、warmup 池、act-pack 梯度污染 |
 | `docs/ailog/260924-103741-...framework-smoke-and-position-finding.md` | 位置外推长度曲线、框架冒烟、ZOO 步长问题 |

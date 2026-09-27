@@ -712,11 +712,163 @@ class OptSdpaSparseGatherAttention(OptSdpaAttention):
         )
 
 
+class OptSdpaPruneAttention(OptSdpaAttention):
+    """
+    # SMELL 3 modeling_opt_smell sdpa_prune ADD — Jenga 真语义「token 子集化」稀疏注意力（fp32 SDPA 路径）。
+    # 权威语义见 JengaForMemoryTest/Jenga/src/jenga/models/modeling_opt.py:294-321：
+    #   layer_idx != num_layers-1 时，predictor(hidden_states)->(b,n_blk,n_blk)，sum_q=sum(dim=-2)->(b,n_blk)；
+    #   下半层 (layer_idx < num_layers//2 - 1) 保留全部块，上半层保留 int(n_blk*config.sparse) 块；
+    #   topk(sum_q).sort() 得 KV 块 idx，展开为 token 索引后 *直接子集化 hidden_states*（L -> kept 个 token），
+    #   再在缩短序列上算 q/k/v 与 dense causal SDPA（is_causal=True）；输出 scatter 回全长 L 供残差使用。
+    # 末层豁免（走父类 dense）。pool=config.pool_size(64)，sparse=config.sparse(0.4)，均不硬编码。
+    # 位置嵌入在 decoder 入口一次性加好（OPTDecoder.forward:1096），层内无位置/无 token 位置算子，
+    # 故层内子集化不破坏位置；子集保持原顺序（idx.sort），causal 在缩短序列上仍单调。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # SMELL 3 modeling_opt_smell sdpa_prune ADD — 最近一次 forward 的剪枝统计（供 smoke/TD 打印 kept token 数）
+        self.last_prune_stats = None
+
+    def _prune_ok(self, hidden_states, is_cross_attention, past_key_value):
+        # SMELL 3 modeling_opt_smell sdpa_prune ADD — 仅 full-seq causal self-attn 且非末层、sparse/pool 合法时走子集化
+        if is_cross_attention or past_key_value is not None:
+            return False
+        num_layers = int(self.config.num_hidden_layers)
+        if self.layer_idx is None or self.layer_idx == num_layers - 1:
+            return False
+        pool = int(getattr(self.config, "pool_size", 64))
+        sparse = getattr(self.config, "sparse", None)
+        if pool <= 0 or sparse is None:
+            return False
+        try:
+            s = float(sparse)
+        except (TypeError, ValueError):
+            return False
+        if not (0.0 < s <= 1.0):
+            return False
+        tgt_len = hidden_states.size(1)
+        if tgt_len % pool != 0:
+            return False
+        return (tgt_len // pool) >= 2
+
+    def _prune_block_scores(self, hidden_states, bsz, n_blocks, pool):
+        # SMELL 3 modeling_opt_smell sdpa_prune ADD — 块分优先 predictor；形状不符/报错/显式 qk 则退化为 q·k 块均值；纯打分无梯度
+        scorer = str(getattr(self.config, "sdpa_prune_scorer", "auto"))
+        scored_by = "qk_block_mean"
+        scores = None
+        if scorer != "qk":
+            try:
+                hidden = hidden_states if hidden_states.is_contiguous() else hidden_states.contiguous()
+                predict_attn = self.predictor(hidden)
+                if predict_attn.dim() == 3 and tuple(predict_attn.shape[-2:]) == (n_blocks, n_blocks):
+                    # SMELL 3 modeling_opt_smell sdpa_prune ADD — 与 Jenga 同：对 query 块维求和，得每 KV 块一个标量
+                    scores = predict_attn.sum(dim=-2)
+                    scored_by = "predictor"
+            except (RuntimeError, ValueError):
+                scores = None
+        if scores is None:
+            # SMELL 3 modeling_opt_smell sdpa_prune ADD — predictor 不可用时以 q/k 投影的块均值点积打分（无梯度）
+            hidden = hidden_states
+            q = self.q_proj(hidden).view(bsz, n_blocks, pool, self.num_heads, self.head_dim)
+            k = self.k_proj(hidden).view(bsz, n_blocks, pool, self.num_heads, self.head_dim)
+            qb = q.mean(dim=2)
+            kb = k.mean(dim=2)
+            scores = torch.einsum("bihd,bjhd->bij", qb, kb).mean(dim=1)
+            scored_by = "qk_block_mean"
+        return scores.float(), scored_by
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        key_value_states: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        layer_head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        """Input shape: Batch x Time x Channel"""
+        is_cross_attention = key_value_states is not None
+        bsz, tgt_len, _ = hidden_states.size()
+        if not self._prune_ok(hidden_states, is_cross_attention, past_key_value):
+            # SMELL 3 modeling_opt_smell sdpa_prune ADD — 不满足条件（末层/cross/past/长度不整除）回退父类 dense SDPA
+            return super().forward(
+                hidden_states,
+                key_value_states=key_value_states,
+                past_key_value=past_key_value,
+                attention_mask=attention_mask,
+                layer_head_mask=layer_head_mask,
+                output_attentions=output_attentions,
+            )
+
+        pool = int(self.config.pool_size)
+        sparse = float(self.config.sparse)
+        num_layers = int(self.config.num_hidden_layers)
+        n_blocks = tgt_len // pool
+        with torch.no_grad():
+            scores, scored_by = self._prune_block_scores(hidden_states, bsz, n_blocks, pool)
+            # SMELL 3 modeling_opt_smell sdpa_prune ADD — 层规则与 Jenga 一致：下半层全留、上半层按 sparse 剪
+            if self.layer_idx < num_layers // 2 - 1:
+                q_len_blocks = n_blocks
+            else:
+                q_len_blocks = max(1, min(int(n_blocks * sparse), n_blocks))
+            _, idx = torch.topk(scores, q_len_blocks, largest=True, dim=-1)
+            idx = idx.sort().values  # (bsz, q_len_blocks) KV 块索引，升序保持原始顺序
+            base = torch.arange(pool, device=idx.device).view(1, 1, pool)
+            expanded_idx = (idx[..., None] * pool + base).reshape(bsz, -1)  # (bsz, q_len_blocks*pool)
+        keep_len = expanded_idx.size(1)
+
+        # SMELL 3 modeling_opt_smell sdpa_prune ADD — 进入 q/k/v 前直接子集化 hidden_states（bsz==1 与 Jenga 的 hidden_states[:, idx, :] 完全一致）
+        if bsz == 1:
+            hidden_states = hidden_states[:, expanded_idx.view(-1), :]
+        else:
+            hidden_states = torch.gather(
+                hidden_states, 1, expanded_idx[..., None].expand(-1, -1, hidden_states.size(-1))
+            )
+
+        query_states = self._shape(self.q_proj(hidden_states), keep_len, bsz)
+        key_states = self._shape(self.k_proj(hidden_states), keep_len, bsz)
+        value_states = self._shape(self.v_proj(hidden_states), keep_len, bsz)
+        if self.is_decoder:
+            past_key_value = (key_states, value_states)
+
+        attn_output = nn.functional.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            attn_mask=None,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=True,
+        )
+        attn_output = attn_output.transpose(1, 2).reshape(bsz, keep_len, self.embed_dim)
+        attn_output = self.out_proj(attn_output)
+
+        # SMELL 3 modeling_opt_smell sdpa_prune ADD — 子集输出 scatter 回全长 L（层残差/add 需 full-seq）；bsz==1 与 Jenga 一致
+        output = torch.zeros((bsz, tgt_len, self.embed_dim), device=attn_output.device, dtype=attn_output.dtype)
+        if bsz == 1:
+            output[0].scatter_(0, expanded_idx.view(-1).unsqueeze(1).expand(-1, self.embed_dim), attn_output[0])
+        else:
+            output = output.scatter(1, expanded_idx[..., None].expand(-1, -1, self.embed_dim), attn_output)
+
+        self.last_prune_stats = {
+            "layer_idx": int(self.layer_idx),
+            "scored_by": scored_by,
+            "pool": pool,
+            "n_blocks": int(n_blocks),
+            "kept_blocks": int(q_len_blocks),
+            "kept_tokens": int(keep_len),
+            "full_tokens": int(tgt_len),
+            "keep_frac": float(keep_len) / float(tgt_len),
+        }
+        return output, None, past_key_value
+
+
 OPT_ATTENTION_CLASSES = {
     "eager": OPTAttention,
     "flash_attention_2": OptFlashAttention2,
     "sdpa": OptSdpaAttention,
     "sdpa_gather": OptSdpaSparseGatherAttention,  # SMELL 3 modeling_opt_smell sparse_gather ADD — 实验用 gather 式块稀疏入口
+    "sdpa_prune": OptSdpaPruneAttention,  # SMELL 3 modeling_opt_smell sdpa_prune ADD — Jenga 真语义 token 子集化入口
 }
 
 
@@ -726,8 +878,11 @@ class OPTDecoderLayer(nn.Module):
         self.embed_dim = config.hidden_size
 
         # SMELL 3 modeling_opt_smell sparse_gather ADD — config.sparse_gather=True 时用 gather 式块稀疏（attn_implementation 仍为 sdpa）
+        # SMELL 3 modeling_opt_smell sdpa_prune ADD — config.sparse_prune=True 时用 Jenga 真语义 token 子集化（attn_implementation 仍为 sdpa）
         attn_cls = OPT_ATTENTION_CLASSES[config.attn_implementation]
-        if getattr(config, "sparse_gather", False) and config.attn_implementation == "sdpa":
+        if config.attn_implementation == "sdpa" and getattr(config, "sparse_prune", False):
+            attn_cls = OptSdpaPruneAttention
+        elif getattr(config, "sparse_gather", False) and config.attn_implementation == "sdpa":
             attn_cls = OptSdpaSparseGatherAttention
         self.self_attn = attn_cls(config=config, is_decoder=True ,layer_idx=layer_idx)
 
@@ -967,7 +1122,8 @@ class OPTDecoder(OPTPreTrainedModel):
 
         self.layers = nn.ModuleList([OPTDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self._use_flash_attention_2 = config.attn_implementation == "flash_attention_2"
-        self._use_sdpa = config.attn_implementation == "sdpa"  # SMELL 3 modeling_opt_smell sdpa ADD
+        # SMELL 3 modeling_opt_smell sdpa_prune ADD — sdpa/sdpa_gather/sdpa_prune 均只传 2D mask，避免 4D causal mask
+        self._use_sdpa = str(config.attn_implementation).startswith("sdpa")
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
