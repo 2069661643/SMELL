@@ -121,7 +121,8 @@ class RoundRobinDemoPool:
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Build Discovery 16k ICL federated shards (scheme A)")
-    ap.add_argument("--out", default="/home/yangyongbo118/projects/SMELL-v3/dataset_v3/discovery_16k")
+    # SMELL 3 build_discovery out_path FIXED — 旧默认写死云端家目录（跨机不可用）；改相对路径，与 build_warmup 一致
+    ap.add_argument("--out", default=os.path.join("dataset_v3", "discovery_16k"))
     ap.add_argument("--tag", default="a01")
     ap.add_argument("--alpha", type=float, default=0.1)
     ap.add_argument("--clients", type=int, default=30)

@@ -16,6 +16,8 @@ CONDA="$HOME/miniconda3/bin/conda"
 ENV_PY="$HOME/miniconda3/envs/$ENV_NAME/bin/python"
 ENV_PIP="$HOME/miniconda3/envs/$ENV_NAME/bin/pip"
 WHEELS="$HOME/wheels"
+# SMELL 3 setup_server torch_wheel FIXED — pip 需要完整 wheel 文件名（缺 cpXX/平台 tag 会报 Invalid wheel filename）
+TORCH_WHEEL_FILE="$WHEELS/torch-2.8.0+cu128-cp310-cp310-manylinux_2_28_x86_64.whl"
 FA_BASE="https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3"
 
 usage() {
@@ -85,12 +87,16 @@ if "$ENV_PY" -c "import torch,sys; sys.exit(0 if (torch.__version__.startswith('
   log "torch 2.8.0+cu128 already installed"
 else
   log "download torch wheel"
-  run curl -fL --retry 3 -o "$WHEELS/torch-2.8.0+cu128.whl" "$TORCH_WHEEL_URL"
+  if [[ -f "$TORCH_WHEEL_FILE" ]]; then
+    log "reuse existing wheel $TORCH_WHEEL_FILE"
+  else
+    run curl -fL --retry 3 -o "$TORCH_WHEEL_FILE" "$TORCH_WHEEL_URL"
+  fi
   if [[ $DRY_RUN -eq 0 ]]; then
-    echo "$TORCH_SHA256  $WHEELS/torch-2.8.0+cu128.whl" | sha256sum -c -
+    echo "$TORCH_SHA256  $TORCH_WHEEL_FILE" | sha256sum -c -
   fi
   log "pip install torch"
-  run "$ENV_PIP" install -i "$PIP_INDEX" "$WHEELS/torch-2.8.0+cu128.whl"
+  run "$ENV_PIP" install -i "$PIP_INDEX" "$TORCH_WHEEL_FILE"
 fi
 
 if "$ENV_PY" -c "import flash_attn" 2>/dev/null; then

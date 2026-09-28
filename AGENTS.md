@@ -35,7 +35,7 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 
 | # | 交付物 | 位置 | 状态 |
 |---|---|---|---|
-| 1 | Discovery 16k 分片（α=0.1/0.3） | `dataset_v3/discovery_16k/{a01,a03}`（gitignore） | 代码 ✅，**数据须云端重建** |
+| 1 | Discovery 16k 分片（α=0.1/0.3） | `dataset_v3/discovery_16k/{a01,a03}`（gitignore） | 代码 ✅；**a01 已在 AutoDL 重建（warmup sha 与清单一致），a03 未建** |
 | 2 | warmup 池（512×16k，零重叠） | 同上 `warmup_input_ids.npy` | 代码 ✅ |
 | 3 | 位置扩展模块 | `src/models/position_embed.py` | ✅ |
 | 4 | 长上下文适配 B/C | `src/train/longctx_adapt.py` | **云端 A40 16k 完成**：B ppl_full 31.4 / C 18.1，2k 无回归；选 C；权重见 `checkpoints/posemb_step1/MANIFEST.json` |
@@ -72,11 +72,13 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 ## AutoDL 4090 工作机（本 checkout：`/root/smell/SMELL`）
 
 - 硬件：1×**RTX 4090 24GB**（sm_89，driver 595 / CUDA 13.2）、20 CPU、系统盘 **30G（紧张，装前先 `df -h`）**。**单卡：示例命令里的 `--gpu 1` 在本机要改 `--gpu 0`**（`run_fed.py --gpu` 直接写 `CUDA_VISIBLE_DEVICES`，索引 1+ 看不到卡）。
-- conda：**`~/miniconda3`**（base py3.12 已装 torch 2.8.0+cu128）。`scripts/setup_server.sh` 的默认路径（`$HOME/miniconda3`、env `SMELL`）**正好适配本机**，但尚未跑过：transformers/peft/flash-attn/jenga/opt-350m 全未装。
+- conda：**`~/miniconda3`，env `SMELL` 已建好**（py3.10.21 + torch 2.8.0+cu128 + flash-attn 2.8.3 + transformers 4.45.2 / peft 0.13.2 + `jenga_src.pth`；脚本一律用 `~/miniconda3/envs/SMELL/bin/python`）。base py3.12 虽也有 torch，但缺 transformers/peft/jenga。
+- 环境已跑通（260928）：`setup_server.sh` 的 **torch wheel 文件名 bug 已修**（旧名缺 cp310 tag → pip `Invalid wheel filename`）；torch wheel 缓存在 `~/wheels/`，重跑自动复用。`third_party/Jenga/checkpoints/opt-350m/` 已从 hf-mirror 拉好。
+- 数据已建：`dataset_v3/discovery_16k/a01`（α=0.1 + warmup，`check_partition` PASSED）；**warmup sha256 与 `docs/weight-manifest.md` 逐字节一致**。
+- **2k 稀疏 BP smoke 已过**（`--truncate 2048 --sparse 0.4`，1 client × 2 samples × 1 step）：bf16+FA2 loss 3.6245 / δ 0.886（`temp/smoke_bp_flash/`）；fp32+`sdpa_prune`+step4 predictor（144 张量）loss 3.6442（`temp/smoke_bp_sdpa_prune/`）；均 ~1.5s/轮。
 - GitHub：**HTTPS git 会挂死，SSH 正常**（`git@github.com` 已认证）。三个 submodule 的 URL 已在本机 `.git/config` 改成 SSH；**别跑 `git submodule sync`**（会改回 HTTPS 再挂死）。SSH 慢时可临时用 `https://ghfast.top/https://github.com/<owner>/<repo>.git` 前缀（本机这样拉了 FwdLLM）。
 - 已就位（sha256 与 `docs/weight-manifest.md` 完全一致）：`checkpoints/posemb_step1/a01_pos_only_500step/`、`checkpoints/predictor/step4_a01_pos_only_causal/`。
-- 尚缺：`third_party/Jenga/checkpoints/opt-350m/`（632M，`setup_server.sh` 可从 hf-mirror 拉）、`dataset_v3/discovery_16k/a01/`（warmup 池，传输或重建）。
-- 本机尚未跑过训练；`python3 -m py_compile` 全 `src/` 已通过（base 无 jenga，跑脚本前先建 env）。
+- 待办：a03 数据未建（需要时 `build_discovery_16k.py --tag a03 --alpha 0.3` + `build_warmup_16k.py --tag a03`）；长跑前先确认 GPU 空闲。
 
 ## 云端 A40 环境（host `amax`；与 WSL 脚本**不一致**，先读再跑）
 
