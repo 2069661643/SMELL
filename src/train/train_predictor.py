@@ -67,11 +67,18 @@ def block_attn_pool_fixed(q, k, block=BLOCK_SIZE):
         raise ValueError(f"sequence length {n_ctx} must be divisible by {block}")
     n_blocks = n_ctx // block
     out = torch.empty((bsz, n_blocks, n_blocks), dtype=q.dtype, device=q.device)
+    # SMELL 3 train_predictor causal_target FIXED — Jenga 原 target 无 causal mask：对 OPT（post-norm、未归一化残差）
+    # 会退化成「位置/范数越大越重要」，预测出的 top-40% 块集中在尾部；而真·causal 注意力集中在**前段**
+    # （oracle: frac_first_half=0.90，corr(非causal,pos)=+0.94、corr(causal,pos)=-0.50）。
+    # 实测 keep-early40% loss=3.53 vs keep-late40% loss=5.08 ⇒ 必须对 key 超前的对做 causal mask。
+    k_idx = torch.arange(n_ctx, device=q.device)[None, :]
     with torch.no_grad():
         for row in range(n_blocks):
             q_block = q[:, :, row * block:(row + 1) * block, :]
             attn = torch.matmul(q_block, k).float()
             attn.relu_()
+            q_idx = torch.arange(row * block, (row + 1) * block, device=q.device)[:, None]
+            attn = attn * (k_idx <= q_idx)
             attn = attn.sum(dim=1)
             pooled = attn.view(bsz, block, n_blocks, block).amax(dim=(1, 3)) / float(block)
             out[:, row, :] = pooled.to(out.dtype)

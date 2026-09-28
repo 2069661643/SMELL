@@ -562,7 +562,9 @@ class OptSdpaAttention(OPTAttention):
         # SMELL 3 modeling_opt_smell sdpa_sparse ADD — full-seq self-attn 时构建块级 top-k 掩码（含 causal）；
         # 掩码非空则 is_causal=False（causal 已编码进 mask），否则保持原 dense is_causal 路径
         attn_mask = None
-        if is_causal and not had_past:
+        # SMELL 3 modeling_opt_smell sdpa_prune_fallback FIXED — _enable_sparse_mask=False（子类 OptSdpaPruneAttention 回退时）
+        # 跳过 dense (bsz,1,L,L) 加性掩码，走纯 causal SDPA，避免 fp32 math 核 O(L^2) OOM
+        if is_causal and not had_past and getattr(self, "_enable_sparse_mask", True):
             attn_mask = self._build_sparse_attn_mask(hidden_states, query_states, key_states, bsz, tgt_len)
         attn_output = nn.functional.scaled_dot_product_attention(
             query_states,
@@ -729,6 +731,9 @@ class OptSdpaPruneAttention(OptSdpaAttention):
         super().__init__(*args, **kwargs)
         # SMELL 3 modeling_opt_smell sdpa_prune ADD — 最近一次 forward 的剪枝统计（供 smoke/TD 打印 kept token 数）
         self.last_prune_stats = None
+        # SMELL 3 modeling_opt_smell sdpa_prune_fallback FIXED — 末层/不满足剪枝条件时回退父类 OptSdpaAttention.forward，
+        # 须禁用它构造 dense (bsz,1,L,L) fp32 加性掩码（thresh∈(0,1) 时），否则 math 核 O(L^2) OOM（16k≈16GiB）
+        self._enable_sparse_mask = False
 
     def _prune_ok(self, hidden_states, is_cross_attention, past_key_value):
         # SMELL 3 modeling_opt_smell sdpa_prune ADD — 仅 full-seq causal self-attn 且非末层、sparse/pool 合法时走子集化

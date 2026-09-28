@@ -41,6 +41,10 @@ def parse_args():
     parser.add_argument("--catv-normalize", choices=("off", "sum"), default="off",
                         help="off = raw summed votes (paper); sum = each client per-layer vote / its sum (v2 legacy)")
     parser.add_argument("--sparse", type=float, default=0.4)
+    # SMELL 3 run_fed dtype_attn ADD — 注意力后端与权重精度：fp32+sdpa_prune 用于 ZOO 精度修复 + Jenga 真语义稀疏
+    parser.add_argument("--attn", choices=("flash", "eager", "sdpa", "sdpa_prune", "sdpa_gather"),
+                        default="flash", help="flash=FA2(bf16); sdpa_prune=token 子集化稀疏(fp32)")
+    parser.add_argument("--dtype", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--gpu", default=None, help="sets CUDA_VISIBLE_DEVICES before importing torch")
     parser.add_argument("--max-clients", type=int, default=0)
     parser.add_argument("--max-train-samples", type=int, default=0)
@@ -408,8 +412,12 @@ def main():
     # SMELL 3 run_fed n_blocks ADD — CATV: 每层块数 N = seq_len / pool_size（按有效序列长度）
     n_blocks = effective_seq_len // BLOCK_SIZE
 
-    config = get_opt_qk(model_name=args.model_dir, flash_attention=True, pool_size=64,
-                        thresh=args.sparse)
+    # SMELL 3 run_fed dtype_attn ADD — fp32 + SDPA(含 sdpa_prune) 接线：bf16 损失量化会吞掉 ZOO 有限差分信号，FA2 不支持 fp32
+    model_dtype = {"bf16": torch.bfloat16, "fp32": torch.float32}[args.dtype]
+    config = get_opt_qk(model_name=args.model_dir, flash_attention=(args.attn == "flash"),
+                        pool_size=64, thresh=args.sparse)
+    if args.attn != "flash":
+        config.attn_implementation = args.attn
     # SMELL 3 run_fed predictor BEGIN — 载入 pruned_config 并在建模前挂到 config（OPTAttention 据此重建剪枝形状）
     predictor_loaded = 0
     if args.predictor:
@@ -419,7 +427,8 @@ def main():
             f"unsupported pruned_config payload from {pruned_path}")
         config.predictor_layers = pruned_payload["layers"]
         print(f"[fed] pruned_config loaded path={pruned_path} layers={len(config.predictor_layers)}")
-    model = OPTForCausalLM.from_pretrained(args.model_dir, torch_dtype=torch.bfloat16, config=config)
+    # SMELL 3 run_fed dtype_attn MODIFIED — 由 args.dtype 决定 bf16/fp32（bf16 旧行为不变）
+    model = OPTForCausalLM.from_pretrained(args.model_dir, torch_dtype=model_dtype, config=config)
     if args.predictor:
         predictor_loaded, _ = load_predictor_weights(model, resolve(args.predictor))
     # SMELL 3 run_fed predictor END
