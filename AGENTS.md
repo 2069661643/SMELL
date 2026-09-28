@@ -3,7 +3,7 @@
 > **你的角色：SMELL-v3 实验 Agent。** 本仓库有 3 类 checkout：云端 **A40×4（host `amax`）** 承担 16k
 > 正式实验与论文图表；**AutoDL 1×RTX 4090 24G（见「AutoDL 4090 工作机」节）**；WSL（8GB RTX 5060）只做 ≤4k smoke。
 > **开工先跑 `hostname` + `git branch --show-current`**：实验工作分支是 **`exp/rank-rotation-lora`**，
-> `main` 只是 260924 的旧交付快照（落后 19 个提交），别在 main 上找近期实验代码。
+> `main` 只是 260924 的旧交付快照（落后约 20 个提交），别在 main 上找近期实验代码。
 
 ## 项目与方向
 
@@ -73,7 +73,7 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 
 - 硬件：1×**RTX 4090 24GB**（sm_89，driver 595 / CUDA 13.2）、20 CPU、系统盘 **30G（紧张，装前先 `df -h`）**。**单卡：示例命令里的 `--gpu 1` 在本机要改 `--gpu 0`**（`run_fed.py --gpu` 直接写 `CUDA_VISIBLE_DEVICES`，索引 1+ 看不到卡）。
 - conda：**`~/miniconda3`**（base py3.12 已装 torch 2.8.0+cu128）。`scripts/setup_server.sh` 的默认路径（`$HOME/miniconda3`、env `SMELL`）**正好适配本机**，但尚未跑过：transformers/peft/flash-attn/jenga/opt-350m 全未装。
-- GitHub：**HTTPS git 会挂死，SSH 正常**（`git@github.com` 已认证）。三个 submodule 的 URL 已在本机 `.git/config` 改成 SSH；**别跑 `git submodule sync`**（会改回 HTTPS 再挂死）。
+- GitHub：**HTTPS git 会挂死，SSH 正常**（`git@github.com` 已认证）。三个 submodule 的 URL 已在本机 `.git/config` 改成 SSH；**别跑 `git submodule sync`**（会改回 HTTPS 再挂死）。SSH 慢时可临时用 `https://ghfast.top/https://github.com/<owner>/<repo>.git` 前缀（本机这样拉了 FwdLLM）。
 - 已就位（sha256 与 `docs/weight-manifest.md` 完全一致）：`checkpoints/posemb_step1/a01_pos_only_500step/`、`checkpoints/predictor/step4_a01_pos_only_causal/`。
 - 尚缺：`third_party/Jenga/checkpoints/opt-350m/`（632M，`setup_server.sh` 可从 hf-mirror 拉）、`dataset_v3/discovery_16k/a01/`（warmup 池，传输或重建）。
 - 本机尚未跑过训练；`python3 -m py_compile` 全 `src/` 已通过（base 无 jenga，跑脚本前先建 env）。
