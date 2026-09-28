@@ -8,14 +8,15 @@
 #              -> lr = 4e-6 * TARGET_DNORM / delta_norm（TARGET_DNORM 默认 0.38 = BP k=4 参考；钳制 [1e-7, 1e-4]）
 #   4) TD-3：run_fed --trainer zoo（rotate4, c30, L2, D22, fp32+sdpa_prune, 每轮 eval/save）
 #
-# 约束：仅 GPU2；predictor 必须用 causal 修复版 step4_a01_pos_only_causal（Jenga 原非 causal 目标会选尾部块）。
-# 可用环境变量覆盖：PY POS PRED PCS BDIR TD2_OUT PROBE_ROOT ZOO_ROOT ROUNDS COS_GATE TARGET_DNORM GPU
+# 约束：predictor 必须用 causal 修复版（Jenga 原非 causal 目标会选尾部块）；ZOO 前向在 ClientRunner 内强制 eval（dropout=0.1 会吞差分）。
+# 可用环境变量覆盖：PY TAG POS PRED PCS BDIR TD2_OUT PROBE_ROOT ZOO_ROOT ROUNDS COS_GATE TARGET_DNORM GPU
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${PY:-$HOME/applications/anaconda3/envs/smell-v2/bin/python}"
+TAG="${TAG:-a01}"
 POS="${POS:-$REPO/checkpoints/posemb_step1/a01_pos_only_500step/pos_embed.pt}"
-PRED="${PRED:-$REPO/checkpoints/predictor/step4_a01_pos_only_causal/predictor.pth}"
-PCS="${PCS:-$REPO/checkpoints/predictor/step4_a01_pos_only_causal/pruned_config.pth}"
+PRED="${PRED:-$REPO/checkpoints/predictor/step5_a01a03_clients_causal/predictor.pth}"
+PCS="${PCS:-$REPO/checkpoints/predictor/step5_a01a03_clients_causal/pruned_config.pth}"
 BDIR="${BDIR:-$REPO/logs/fed}"
 TD2_OUT="${TD2_OUT:-$REPO/temp/diag_cos_sparse_td2_k4_causal.json}"
 PROBE_ROOT="${PROBE_ROOT:-$BDIR/zoo_k4_sparse_causal_preflight}"
@@ -34,6 +35,7 @@ echo "[$(date +%H:%M:%S)] STEP start run_dir=$RUN_DIR rounds=$ROUNDS cos_gate=$C
 # ---- Stage 1: TD-2' k4 稀疏 cos @16k ----
 echo "[$(date +%H:%M:%S)] STEP td2_k4 start (sdpa_prune fp32 seq=16384 k4=layers20-23 L2 D22 c=1..30)"
 "$PY" -u "$REPO/scripts/diag_cos_grid.py" --gpu "$GPU" --attn sdpa_prune --dtype fp32 --seq 16384 \
+  --data-root "$REPO/dataset_v3/discovery_16k/$TAG/clients" \
   --block-layers 20-23 --blocks k4 --n-clients 30 --ls 2 --ds 22 --cs 1,5,10,20,30 \
   --lora-r 1 --alpha 2.0 --pos-checkpoint "$POS" --predictor "$PRED" --pruned-config "$PCS" \
   --out "$TD2_OUT"
@@ -48,23 +50,30 @@ if ! awk "BEGIN{exit !($COS >= $COS_GATE)}"; then
 fi
 
 # ---- Stage 2: lr 校准（probe lr=4e-6 -> 对齐 BP k=4 delta_norm） ----
-echo "[$(date +%H:%M:%S)] STEP lr_probe start (1 client/1 sample, probe lr=4e-6)"
+# SMELL 3 run_k4_td2_td3 probe FIXED — 探针须与 TD-3 同步数（2 samples × local-steps 2 = 2 步）；delta_norm<=0 直接中止
+echo "[$(date +%H:%M:%S)] STEP lr_probe start (1 client/2 samples, probe lr=4e-6)"
 rm -rf "$PROBE_ROOT"
-"$PY" src/fed/run_fed.py --tag a01 --gpu "$GPU" --trainer zoo --catv off \
+mkdir -p "$PROBE_ROOT"
+"$PY" src/fed/run_fed.py --tag "$TAG" --gpu "$GPU" --trainer zoo --catv off \
   --dtype fp32 --attn sdpa_prune --sparse 0.4 \
   --pos-checkpoint "$POS" --predictor "$PRED" --pruned-config "$PCS" \
   --lora-r 1 --lora-alpha 2 \
   --zo-subspace layers --zo-layer-rotate --zo-layer-group 4 \
-  --max-clients 1 --max-train-samples 1 --local-steps 2 --zo-directions 22 --zo-eps 1e-3 \
-  --rounds 1 --lr 4e-6 --out-root "$PROBE_ROOT" >/dev/null 2>&1
-DN=$("$PY" -c "import json;print(json.loads(open('$PROBE_ROOT/a01/metrics.jsonl').readline())['delta_norm_mean'])" 2>/dev/null || echo 0)
+  --max-clients 1 --max-train-samples 2 --local-steps 2 --zo-directions 22 --zo-eps 1e-3 \
+  --rounds 1 --lr 4e-6 --out-root "$PROBE_ROOT" > "$PROBE_ROOT/driver.log" 2>&1
+DN=$("$PY" -c "import json;print(json.loads(open('$PROBE_ROOT/$TAG/metrics.jsonl').readline())['delta_norm_mean'])" 2>/dev/null || echo 0)
 echo "[$(date +%H:%M:%S)] STEP lr_probe delta_norm=$DN"
-LR=$("$PY" -c "d=float('$DN') or 1e-9; print(min(max(4e-6*$TARGET_DNORM/d,1e-7),1e-4))")
+if ! awk "BEGIN{exit !($DN > 0)}"; then
+  echo "[$(date +%H:%M:%S)] STEP ABORT lr_probe delta_norm=$DN <= 0; tail $PROBE_ROOT/driver.log:"
+  tail -n 5 "$PROBE_ROOT/driver.log" 2>/dev/null
+  exit 1
+fi
+LR=$("$PY" -c "d=float('$DN'); print(min(max(4e-6*$TARGET_DNORM/d,1e-7),1e-4))")
 echo "[$(date +%H:%M:%S)] STEP lr_calibrated=$LR (target delta_norm=$TARGET_DNORM)"
 
 # ---- Stage 3: TD-3 k=4 sparsity ZOO（rotate4, L2 D22, c30, eval/save 每轮） ----
 echo "[$(date +%H:%M:%S)] STEP td3 start lr=$LR rounds=$ROUNDS eval_every=1"
-"$PY" src/fed/run_fed.py --tag a01 --gpu "$GPU" --trainer zoo --catv off \
+"$PY" src/fed/run_fed.py --tag "$TAG" --gpu "$GPU" --trainer zoo --catv off \
   --dtype fp32 --attn sdpa_prune --sparse 0.4 \
   --pos-checkpoint "$POS" --predictor "$PRED" --pruned-config "$PCS" \
   --lora-r 1 --lora-alpha 2 \

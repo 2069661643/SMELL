@@ -12,6 +12,13 @@ ZO_DIRS=8
 ZO_EPS=1e-3
 SPARSE=0.4
 CATV_R=0.2
+# SMELL 3 run_ablation_cloud dtype_attn ADD — 训练须 fp32+sdpa_prune（bf16 吞 ZOO 差分；predictor 仅在此路径生效）
+ATTN="${ATTN:-sdpa_prune}"
+DTYPE="${DTYPE:-fp32}"
+PREDICTOR="${PREDICTOR:-$REPO/checkpoints/predictor/step5_a01a03_clients_causal/predictor.pth}"
+PRUNED_CONFIG="${PRUNED_CONFIG:-$REPO/checkpoints/predictor/step5_a01a03_clients_causal/pruned_config.pth}"
+LORA_R="${LORA_R:-1}"
+LORA_ALPHA="${LORA_ALPHA:-2}"
 POS_CKPT=""
 ADAPTER_INIT=""
 DATA_ROOT="dataset_v3/discovery_16k"
@@ -66,9 +73,18 @@ for i in "${!NAMES[@]}"; do
   [[ -n "$POS_CKPT" ]] && extra+=(--pos-checkpoint "$POS_CKPT")
   [[ -n "$ADAPTER_INIT" ]] && extra+=(--adapter-init "$ADAPTER_INIT")
 
+  # SMELL 3 run_ablation_cloud catv_prune_guard ADD — CATV vote_callback 只在 flash 路径接线；未接线前禁止该组合（审计 260928）
+  if [[ "$catv" == "on" && "$ATTN" != "flash" ]]; then
+    echo "ABORT: CATV=on with --attn $ATTN not wired (vote callback only in flash); set ATTN=flash or wait for prune-path votes"
+    exit 2
+  fi
+
   CMD=("$PY" "$REPO/src/fed/run_fed.py"
        --data-root "$DATA_ROOT" --tag "$tag" --gpu "$gpu"
        --trainer zoo --catv "$catv" --catv-r "$CATV_R" --sparse "$SPARSE"
+       --dtype "$DTYPE" --attn "$ATTN"
+       --predictor "$PREDICTOR" --pruned-config "$PRUNED_CONFIG"
+       --lora-r "$LORA_R" --lora-alpha "$LORA_ALPHA"
        --rounds "$ROUNDS" --local-steps "$LOCAL_STEPS" --lr "$LR"
        --zo-directions "$ZO_DIRS" --zo-eps "$ZO_EPS"
        --out-root "$OUT_ROOT" "${extra[@]}")

@@ -16,13 +16,21 @@ for extra in (str(REPO), str(JENGA_SRC)):
     if extra not in sys.path:
         sys.path.insert(0, extra)
 
-from jenga.models.modeling_opt import OPTForCausalLM  # noqa: E402
+from jenga.models.modeling_opt import OPTForCausalLM as JengaOPTForCausalLM  # noqa: E402
 from jenga.utils.config_utils import get_opt_qk  # noqa: E402
 
 from src.models.position_embed import ensure_positions  # noqa: E402
+# SMELL 3 ppl smelly_model ADD — sdpa/sdpa_prune 评测须用本仓 OPT 拷贝（含 OptSdpaPruneAttention），与训练一致
+from src.models.modeling_opt_smell import OPTForCausalLM as SmellOPTForCausalLM  # noqa: E402
 
 DEFAULT_MODEL_DIR = REPO / "third_party" / "Jenga" / "checkpoints" / "opt-350m"
 LOGIT_CHUNK = 1024
+
+
+def resolve_path(path):
+    # SMELL 3 ppl resolve_path ADD — 相对路径一律相对仓库根解析（与 run_fed 一致）
+    path = Path(path)
+    return path if path.is_absolute() else REPO / path
 
 
 def parse_args():
@@ -36,6 +44,12 @@ def parse_args():
     parser.add_argument("--client", default=None, help="client id for --split local, e.g. 07")
     parser.add_argument("--adapter", default=None, help="optional PEFT adapter dir")
     parser.add_argument("--no-flash", action="store_true")
+    # SMELL 3 ppl attn_dtype ADD — 评测须与训练同 attn/dtype；--no-flash 保留为 eager 旧别名
+    parser.add_argument("--attn", choices=("flash", "eager", "sdpa", "sdpa_prune"), default=None)
+    parser.add_argument("--dtype", choices=("bf16", "fp32"), default="bf16")
+    # SMELL 3 ppl predictor ADD — 训练后 predictor/pruned_config 成对传入；不传则 Jenga 对非末层用随机 predictor（审计 260928）
+    parser.add_argument("--predictor", default=None)
+    parser.add_argument("--pruned-config", default=None)
     parser.add_argument("--sparse", type=float, default=0.4)
     parser.add_argument("--pos-mode", choices=("jenga_dup_scaled", "duplicate", "interpolate"),
                         default="jenga_dup_scaled")
@@ -44,6 +58,9 @@ def parse_args():
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument("--truncate", type=int, default=0, help="testing only: use first N tokens")
     parser.add_argument("--out", default=None, help="JSON output path")
+    # SMELL 3 ppl per_sample ADD — 逐样本 NLL 输出（scripts/paired_eval.py 配对检验用）
+    parser.add_argument("--per-sample-out", default=None)
+    parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args()
 
 
@@ -80,9 +97,27 @@ def get_lm_head(model):
 
 
 def build_model(args, effective_max_len):
-    config = get_opt_qk(model_name=args.model_dir, flash_attention=not args.no_flash,
+    # SMELL 3 ppl attn_dtype MODEL MODIFIED — 按 --attn/--dtype 选后端与建模类（flash 用 Jenga 原生；sdpa* 用本仓拷贝）
+    attn = args.attn
+    dtype = {"bf16": torch.bfloat16, "fp32": torch.float32}[args.dtype]
+    config = get_opt_qk(model_name=args.model_dir, flash_attention=(attn == "flash"),
                         pool_size=64, thresh=args.sparse)
-    model = OPTForCausalLM.from_pretrained(args.model_dir, torch_dtype=torch.bfloat16, config=config)
+    if attn != "flash":
+        config.attn_implementation = attn
+    # SMELL 3 ppl predictor BEGIN — 先按 pruned_config 重建 predictor 形状，再载入训练后权重（缺 key 会报错）
+    if args.predictor:
+        pruned_payload = torch.load(resolve_path(args.pruned_config), map_location="cpu")
+        assert isinstance(pruned_payload, dict) and "layers" in pruned_payload, (
+            f"unsupported pruned_config payload from {args.pruned_config}")
+        config.predictor_layers = pruned_payload["layers"]
+    model_cls = JengaOPTForCausalLM if attn == "flash" else SmellOPTForCausalLM
+    model = model_cls.from_pretrained(args.model_dir, torch_dtype=dtype, config=config)
+    if args.predictor:
+        from src.fed.run_fed import load_predictor_weights
+        loaded, skipped, zero_filled = load_predictor_weights(model, resolve_path(args.predictor))
+        print(f"[ppl] predictor loaded tensors={loaded} zero_filled={zero_filled} "
+              f"skipped={skipped} path={args.predictor}")
+    # SMELL 3 ppl predictor END
     # SMELL 3 position_embed ADD — 16k 序列需扩展 embed_positions（OPT 原表仅 2050 行）
     model = ensure_positions(model, effective_max_len, mode=args.pos_mode)
     # SMELL 3 ppl pos_checkpoint BEGIN — 覆盖为 warmup 训得的 embed_positions（形状不符时按行数再扩展）
@@ -129,6 +164,11 @@ def sequence_nll(model, input_ids):
 
 def main():
     args = parse_args()
+    # SMELL 3 ppl attn_default MODIFIED — --attn 未显式给出时沿用 --no-flash 旧语义；固定 seed 让未传 predictor 时的随机基线可复现
+    args.attn = args.attn or ("eager" if args.no_flash else "flash")
+    if bool(args.predictor) != bool(args.pruned_config):
+        raise SystemExit("--predictor and --pruned-config must be provided together")
+    torch.manual_seed(args.seed)
     ids_path, labels_path, spans_path = resolve_data_paths(args)
     for path in (ids_path, labels_path, spans_path):
         if not path.exists():
@@ -150,6 +190,8 @@ def main():
     ans_count = 0
     ans_per_sample = []
     seq_lengths = []
+    # SMELL 3 ppl per_sample ADD — 逐样本 mean NLL（供 scripts/paired_eval.py 做配对检验）
+    per_sample_rows = []
     for index in range(num_eval):
         input_ids = torch.from_numpy(input_ids_all[index].astype(np.int64)).unsqueeze(0).cuda()
         if args.truncate > 0:
@@ -165,11 +207,20 @@ def main():
         full_per_sample.append(float(torch.exp(nll.mean())))
         seq_lengths.append(length)
         answer_end = min(span_end, length)
+        answer_mean_nll = None
         if answer_end > span_start:
             answer_nll = nll[span_start - 1:answer_end - 1]
             ans_sum += float(answer_nll.sum())
             ans_count += int(answer_nll.numel())
             ans_per_sample.append(float(torch.exp(answer_nll.mean())))
+            answer_mean_nll = float(answer_nll.mean())
+        # SMELL 3 ppl per_sample ADD — 同输入逐样本记录，供配对检验（scripts/paired_eval.py）
+        per_sample_rows.append({
+            "index": int(index),
+            "length": int(length),
+            "full_nll_mean": float(nll.mean()),
+            "answer_nll_mean": answer_mean_nll,
+        })
 
     full_ppl_token = math.exp(full_sum / full_count) if full_count else None
     full_ppl_sample = sum(full_per_sample) / len(full_per_sample) if full_per_sample else None
@@ -178,7 +229,8 @@ def main():
 
     print(f"[ppl] data={ids_path}")
     print(f"[ppl] samples={len(seq_lengths)} total_tokens={full_count} "
-          f"mean_len={sum(seq_lengths) / len(seq_lengths):.1f} sparse={args.sparse} flash={not args.no_flash}")
+          f"mean_len={sum(seq_lengths) / len(seq_lengths):.1f} sparse={args.sparse} "
+          f"attn={args.attn} dtype={args.dtype} predictor={args.predictor}")
     print(f"[ppl] full-text   token_ppl={full_ppl_token:.4f} "
           f"sample_mean_ppl={full_ppl_sample:.4f} scored_tokens={full_count}")
     if ans_count:
@@ -194,6 +246,11 @@ def main():
         "answer_spans": str(spans_path),
         "sparse": args.sparse,
         "flash": not args.no_flash,
+        "attn": args.attn,
+        "dtype": args.dtype,
+        "predictor": str(args.predictor) if args.predictor else None,
+        "pruned_config": str(args.pruned_config) if args.pruned_config else None,
+        "seed": args.seed,
         "truncate": args.truncate,
         "num_samples": len(seq_lengths),
         "mean_seq_len": (sum(seq_lengths) / len(seq_lengths)) if seq_lengths else None,
@@ -209,6 +266,16 @@ def main():
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
         print(f"[ppl] wrote {out_path}")
+    # SMELL 3 ppl per_sample ADD — 逐样本 NLL 落盘（run_global_eval 传 --per-sample-out，配对检验用）
+    if args.per_sample_out:
+        per_path = Path(args.per_sample_out)
+        per_path.parent.mkdir(parents=True, exist_ok=True)
+        per_path.write_text(json.dumps({
+            "input_ids": str(ids_path),
+            "num_samples": len(per_sample_rows),
+            "rows": per_sample_rows,
+        }, indent=2), encoding="utf-8")
+        print(f"[ppl] wrote per-sample {per_path}")
 
 
 if __name__ == "__main__":

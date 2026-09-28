@@ -157,10 +157,27 @@ def load_predictor_weights(model, path):
         raise RuntimeError(
             f"predictor shape mismatch for {len(mismatched)} tensors, e.g. {mismatched[:3]}; "
             f"--pruned-config must match --predictor")
+    # SMELL 3 run_fed predictor_missing FIXED — 缺失的 predictor 权重不得静默留随机值：
+    # 训练侧 PrunableAttnPredictor 的 Linear 是 bias=False（checkpoint 只有 weight），
+    # 推理侧 PrunableAttnPredictorInfer 带 bias → 等价语义（bias=0）零填充；其余缺失硬报错
+    expected = [key for key in model_state if ".predictor." in key]
+    missing = [key for key in expected if key not in state]
+    zero_filled = [key for key in missing if key.endswith(".bias")]
+    hard_missing = [key for key in missing if key not in zero_filled]
+    if hard_missing:
+        raise RuntimeError(
+            f"predictor checkpoint {path} missing {len(hard_missing)}/{len(expected)} model predictor "
+            f"tensors, e.g. {hard_missing[:3]}; check --predictor/--pruned-config pairing")
+    if zero_filled:
+        with torch.no_grad():
+            for key in zero_filled:
+                model_state[key].zero_()
+        print(f"[fed] predictor zero-filled {len(zero_filled)} untrained bias tensors "
+              f"(train-side predictor uses bias=False)")
     if loaded == 0:
         raise RuntimeError(f"predictor loaded 0 tensors from {path}; check key prefixes")
-    print(f"[fed] predictor loaded tensors={loaded} skipped={skipped} path={path}")
-    return loaded, skipped
+    print(f"[fed] predictor loaded tensors={loaded} skipped={skipped} zero_filled={len(zero_filled)} path={path}")
+    return loaded, skipped, len(zero_filled)
 # SMELL 3 run_fed predictor END
 
 
@@ -279,6 +296,7 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx):
     model.save_pretrained(str(adapter_dir))
     # SMELL 3 run_fed eval_lora_checkpoint ADD — 记录每次 eval 保存的 LoRA checkpoint 路径
     eval_out = out_dir / f"eval_round{round_idx:03d}.json"
+    per_sample_out = out_dir / f"eval_round{round_idx:03d}_persample.json"
     command = [
         sys.executable, str(REPO / "src" / "eval" / "ppl.py"),
         "--model-dir", args.model_dir,
@@ -287,8 +305,17 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx):
         "--split", "global",
         "--adapter", str(adapter_dir),
         "--sparse", str(args.sparse),
+        # SMELL 3 run_fed eval_attn_dtype FIXED — 评测与训练同 attn/dtype（审计 260928：旧评测算 bf16+FA2 且随机 predictor）
+        "--attn", str(args.attn),
+        "--dtype", str(args.dtype),
         "--out", str(eval_out),
+        # SMELL 3 run_fed eval_persample ADD — 逐样本 NLL 落盘，供 scripts/paired_eval.py 配对检验
+        "--per-sample-out", str(per_sample_out),
     ]
+    # SMELL 3 run_fed eval_predictor FIXED — 必须加载训练后 predictor，否则 Jenga 对非末层用随机 predictor 剪枝
+    if getattr(args, "predictor", None):
+        command += ["--predictor", str(resolve(args.predictor)),
+                    "--pruned-config", str(resolve(args.pruned_config))]
     # SMELL 3 run_fed eval pos_checkpoint ADD — 评测须加载同一 pos_embed，否则位置表错位导致 G-PPL 失真
     if getattr(args, "pos_checkpoint", None):
         command += ["--pos-checkpoint", str(args.pos_checkpoint)]
@@ -301,6 +328,7 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx):
             "trainer": args.trainer,
             # SMELL 3 run_fed eval_lora_checkpoint ADD — 记录每次 eval 保存的 LoRA checkpoint 路径
             "lora_checkpoint": str(adapter_dir),
+            "per_sample": str(per_sample_out),
         })
         print(f"[fed] eval round {round_idx} FAILED rc={proc.returncode}: {proc.stderr.strip()[-200:]}")
         print(f"[fed] eval round {round_idx} lora_checkpoint={adapter_dir}")
@@ -309,7 +337,8 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx):
     append_metrics(metrics_path, {"event": "eval", "round": round_idx, "status": "ok",
                                   "trainer": args.trainer,
                                   # SMELL 3 run_fed eval_lora_checkpoint ADD — 记录每次 eval 保存的 LoRA checkpoint 路径
-                                  "lora_checkpoint": str(adapter_dir), **payload})
+                                  "lora_checkpoint": str(adapter_dir),
+                                  "per_sample": str(per_sample_out), **payload})
     print(f"[fed] eval round {round_idx} full_ppl_token={payload['full_ppl_token']} "
           f"answer_ppl_token={payload['answer_ppl_token']}")
     print(f"[fed] eval round {round_idx} lora_checkpoint={adapter_dir}")
@@ -329,6 +358,10 @@ def main():
             raise SystemExit(f"CATV requires 0 < r < s, got r={catv_r} s={args.sparse}")
         if args.sparse + catv_r > 1.0 + 1e-9:
             raise SystemExit(f"CATV requires s + r <= 1, got s={args.sparse} r={catv_r}")
+    # SMELL 3 run_fed catv_sdpa_guard ADD — CATV vote_callback 只在 flash 注意力里接线；sdpa/prune 下收不到票且 round0 会崩，提前 fail-fast
+    if catv_on and args.attn != "flash":
+        raise SystemExit(
+            f"--catv on requires --attn flash (vote callback is not wired for {args.attn})")
 
     # SMELL 3 run_fed predictor ADD — predictor/pruned-config 必须成对提供
     if bool(args.predictor) != bool(args.pruned_config):
@@ -430,7 +463,7 @@ def main():
     # SMELL 3 run_fed dtype_attn MODIFIED — 由 args.dtype 决定 bf16/fp32（bf16 旧行为不变）
     model = OPTForCausalLM.from_pretrained(args.model_dir, torch_dtype=model_dtype, config=config)
     if args.predictor:
-        predictor_loaded, _ = load_predictor_weights(model, resolve(args.predictor))
+        predictor_loaded, _, predictor_zero_filled = load_predictor_weights(model, resolve(args.predictor))
     # SMELL 3 run_fed predictor END
     # SMELL 3 run_fed base_config ADD — 保存 LoRA 包装前的 OPTConfig 引用（vote_callback/consensus_mask 挂载点）
     base_config = model.config
@@ -534,6 +567,7 @@ def main():
         "resolved_predictor": str(resolve(args.predictor)) if args.predictor else None,
         "resolved_pruned_config": str(resolve(args.pruned_config)) if args.pruned_config else None,
         "predictor_loaded_tensors": predictor_loaded,
+        "predictor_zero_filled_tensors": predictor_zero_filled,
         "torch_version": torch.__version__,
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
     }
