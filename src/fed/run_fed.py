@@ -679,6 +679,8 @@ def main():
         norms = [stats["delta_norm"] for stats in client_stats.values()]
         # SMELL 3 run_fed delta_clip ADD — 本轮被裁剪的 client 数（诊断重尾离群）
         clipped_clients = sum(1 for stats in client_stats.values() if stats["delta_clip_applied"])
+        # SMELL 3 run_fed delta_clip ADD — 裁剪后范数均值（聚合实际口径；raw 均值仍会被离群值拉高）
+        clipped_norms = [delta_norm(delta) for delta in deltas]
         # SMELL 3 run_fed per_module_delta ADD — 各层 δ 范数的跨 client 均值（缺失层按 0 计）
         layer_keys = sorted(
             {key for stats in client_stats.values() for key in stats["delta_norm_by_layer"]},
@@ -700,6 +702,7 @@ def main():
             "delta_norm_min": min(norms),
             "delta_norm_max": max(norms),
             "clipped_clients": clipped_clients,
+            "delta_norm_clipped_mean": sum(clipped_norms) / len(clipped_norms),
             # SMELL 3 run_fed per_module_delta ADD — 逐层 δ 范数跨 client 均值
             "delta_norm_by_layer_mean": delta_norm_by_layer_mean,
             # SMELL 3 run_fed zo_layer_rotate ADD — 本轮实际激活层（rotate=轮转集合；固定 layers=zo_layers）

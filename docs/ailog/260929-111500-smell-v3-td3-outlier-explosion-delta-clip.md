@@ -24,7 +24,7 @@
 
 - `src/fed/run_fed.py` 新增 **`--delta-clip`（默认 1.0，<=0 关闭）**：
   - 聚合前对每个 client 的 delta 做全局 L2 范数裁剪（保方向、仅缩放超限者）；
-  - `client_stats` 新增 `delta_clip_applied`；round 记录新增 `clipped_clients`；`[fed] round` 日志打印 `clipped=N`；
+  - `client_stats` 新增 `delta_clip_applied`；round 记录新增 `clipped_clients`、`delta_norm_clipped_mean`；`[fed] round` 日志打印 `clipped=N`；
   - `delta_norm` 统计保留**原始**范数（供诊断离群）。
 - `scripts/run_k4_td2_td3.sh`：TD-3 阶段加 `--delta-clip`（env `DELTA_CLIP`，默认 1.0）。
 - 阈值依据：16k round-0 正常 δ∈[0.33, 1.05]，裁剪 1.0 只影响离群；被裁 client 对聚合的相对贡献 ~1/30（原 810/0.45≈1800×）。
