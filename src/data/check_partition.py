@@ -58,8 +58,9 @@ def main():
             errors.append(bad)
 
     log(f"[check] root={root}")
+    # SMELL 3 check_partition template_hash FIXED — arxiv meta 无模板哈希时不再 KeyError
     log(f"[check] source={meta.get('source')} alpha={meta['alpha']} seed={meta['seed']} "
-        f"seq_len={seq_len} template_hash={meta['template_hash']}")
+        f"seq_len={seq_len} template_hash={meta.get('template_hash')}")
     expect(seq_len % 64 == 0, f"seq_len={seq_len} divisible by 64", f"seq_len={seq_len} not divisible by 64")
 
     tok = AutoTokenizer.from_pretrained(meta["tokenizer"], use_fast=True)
@@ -68,7 +69,11 @@ def main():
     def check_matrix(tag, dirpath, prefix, expect_rows, print_decoded=False):
         ids = np.load(os.path.join(dirpath, f"{prefix}_input_ids.npy"))
         labels = np.load(os.path.join(dirpath, f"{prefix}_labels.npy"))
-        spans = np.load(os.path.join(dirpath, f"{prefix}_answer_spans.npy"))
+        # SMELL 3 check_partition lengths ADD — 有 *_lengths.npy 走 arxiv 右 padding 校验，否则回退 Discovery answer_spans
+        lengths_path = os.path.join(dirpath, f"{prefix}_lengths.npy")
+        has_lengths = os.path.exists(lengths_path)
+        lengths = np.load(lengths_path) if has_lengths else None
+        spans = None if has_lengths else np.load(os.path.join(dirpath, f"{prefix}_answer_spans.npy"))
         n_before = len(errors)
         expect(ids.dtype == np.uint16, f"{tag}: input_ids dtype=uint16",
                f"{tag}: dtype={ids.dtype} != uint16", quiet=True)
@@ -78,35 +83,58 @@ def main():
                f"{tag}: labels dtype={labels.dtype}", quiet=True)
         expect(labels.shape == (expect_rows,), f"{tag}: labels shape correct",
                f"{tag}: labels shape={labels.shape}", quiet=True)
-        expect(spans.dtype == np.int32, f"{tag}: spans dtype=int32",
-               f"{tag}: spans dtype={spans.dtype}", quiet=True)
-        expect(spans.shape == (expect_rows, 2), f"{tag}: spans shape correct",
-               f"{tag}: spans shape={spans.shape}", quiet=True)
+        if has_lengths:
+            expect(lengths.dtype == np.int32, f"{tag}: lengths dtype=int32",
+                   f"{tag}: lengths dtype={lengths.dtype}", quiet=True)
+            expect(lengths.shape == (expect_rows,), f"{tag}: lengths shape correct",
+                   f"{tag}: lengths shape={lengths.shape}", quiet=True)
+        else:
+            expect(spans.dtype == np.int32, f"{tag}: spans dtype=int32",
+                   f"{tag}: spans dtype={spans.dtype}", quiet=True)
+            expect(spans.shape == (expect_rows, 2), f"{tag}: spans shape correct",
+                   f"{tag}: spans shape={spans.shape}", quiet=True)
         counts = np.zeros(n_classes)
         if ids.shape == (expect_rows, seq_len) and labels.shape == (expect_rows,):
             expect(int(labels.min()) >= 0 and int(labels.max()) < n_classes,
                    f"{tag}: labels within [0,{n_classes})",
                    f"{tag}: labels out of range [{int(labels.min())},{int(labels.max())})", quiet=True)
-            start, end = spans[:, 0].astype(np.int64), spans[:, 1].astype(np.int64)
-            bad_spans = [(r, int(start[r]), int(end[r])) for r in range(expect_rows)
-                         if not (0 <= start[r] < end[r] <= seq_len)]
-            expect(not bad_spans, f"{tag}: all {expect_rows} spans in range",
-                   f"{tag}: bad spans {bad_spans[:5]}", quiet=True)
-            decoded = [tok.decode(ids[r, start[r]:end[r]].tolist(), skip_special_tokens=False).strip()
-                       for r in range(expect_rows)]
-            mism = [(r, decoded[r], names[int(labels[r])]) for r in range(expect_rows)
-                    if decoded[r] != names[int(labels[r])]]
-            expect(not mism, f"{tag}: decoded spans == label names (all {expect_rows})",
-                   f"{tag}: decode mismatch {mism[:5]}", quiet=True)
-            expect(not bool(np.any(ids == pad_id)), f"{tag}: no pad token (id={pad_id})",
-                   f"{tag}: contains pad token id={pad_id}", quiet=True)
-            counts = np.bincount(labels, minlength=n_classes).astype(np.float64)
-            if print_decoded:
-                for r in range(min(5, expect_rows)):
-                    log(f"    {tag}[{r}] label={names[int(labels[r])]!r} "
-                        f"span=[{int(start[r])},{int(end[r])}) decoded={decoded[r]!r}")
+            if has_lengths and lengths.shape == (expect_rows,):
+                expect(int(lengths.min()) >= 1 and int(lengths.max()) <= seq_len,
+                       f"{tag}: lengths within [1,{seq_len}]",
+                       f"{tag}: lengths out of range [{int(lengths.min())},{int(lengths.max())}]", quiet=True)
+                bad_pad = [r for r in range(expect_rows)
+                           if bool(np.any(ids[r, int(lengths[r]):] != pad_id))]
+                expect(not bad_pad, f"{tag}: right padding equal to pad id={pad_id}",
+                       f"{tag}: non-pad token after lengths in rows {bad_pad[:5]}", quiet=True)
+                counts = np.bincount(labels, minlength=n_classes).astype(np.float64)
+                if print_decoded:
+                    log(f"    {tag}: lengths min/mean/max="
+                        f"{int(lengths.min())}/{lengths.mean():.1f}/{int(lengths.max())}")
+                    for r in range(min(5, expect_rows)):
+                        log(f"    {tag}[{r}] label={names[int(labels[r])]!r} length={int(lengths[r])}")
+            elif not has_lengths:
+                start, end = spans[:, 0].astype(np.int64), spans[:, 1].astype(np.int64)
+                bad_spans = [(r, int(start[r]), int(end[r])) for r in range(expect_rows)
+                             if not (0 <= start[r] < end[r] <= seq_len)]
+                expect(not bad_spans, f"{tag}: all {expect_rows} spans in range",
+                       f"{tag}: bad spans {bad_spans[:5]}", quiet=True)
+                decoded = [tok.decode(ids[r, start[r]:end[r]].tolist(), skip_special_tokens=False).strip()
+                           for r in range(expect_rows)]
+                mism = [(r, decoded[r], names[int(labels[r])]) for r in range(expect_rows)
+                        if decoded[r] != names[int(labels[r])]]
+                expect(not mism, f"{tag}: decoded spans == label names (all {expect_rows})",
+                       f"{tag}: decode mismatch {mism[:5]}", quiet=True)
+                expect(not bool(np.any(ids == pad_id)), f"{tag}: no pad token (id={pad_id})",
+                       f"{tag}: contains pad token id={pad_id}", quiet=True)
+                counts = np.bincount(labels, minlength=n_classes).astype(np.float64)
+                if print_decoded:
+                    for r in range(min(5, expect_rows)):
+                        log(f"    {tag}[{r}] label={names[int(labels[r])]!r} "
+                            f"span=[{int(start[r])},{int(end[r])}) decoded={decoded[r]!r}")
         if len(errors) == n_before:
-            log(f"  OK   {tag}: n={expect_rows} seq_len={seq_len} dtype/span/decode/pad all consistent")
+            # SMELL 3 check_partition summary MODIFIED — arxiv lengths 数据无 span/decode，摘要按数据风格区分
+            style = "lengths/pad" if has_lengths else "span/decode/pad"
+            log(f"  OK   {tag}: n={expect_rows} seq_len={seq_len} dtype/{style} all consistent")
         return counts
 
     expect(os.path.exists(os.path.join(root, "global_test_input_ids.npy")),
