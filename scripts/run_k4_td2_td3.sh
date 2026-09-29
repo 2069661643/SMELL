@@ -9,7 +9,7 @@
 #   4) TD-3：run_fed --trainer zoo（rotate4, c30, L2, D22, fp32+sdpa_prune, 每轮 eval/save）
 #
 # 约束：predictor 必须用 causal 修复版（Jenga 原非 causal 目标会选尾部块）；ZOO 前向在 ClientRunner 内强制 eval（dropout=0.1 会吞差分）。
-# 可用环境变量覆盖：PY TAG POS PRED PCS BDIR TD2_OUT PROBE_ROOT ZOO_ROOT ROUNDS COS_GATE TARGET_DNORM GPU
+# 可用环境变量覆盖：PY TAG POS PRED PCS BDIR TD2_OUT PROBE_ROOT ZOO_ROOT ROUNDS COS_GATE TARGET_DNORM DELTA_CLIP GPU
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${PY:-$HOME/applications/anaconda3/envs/smell-v2/bin/python}"
@@ -24,6 +24,8 @@ ZOO_ROOT="${ZOO_ROOT:-$BDIR/zoo_k4_sparse_causal}"
 ROUNDS="${ROUNDS:-30}"
 COS_GATE="${COS_GATE:-0.05}"
 TARGET_DNORM="${TARGET_DNORM:-0.38}"
+# SMELL 3 run_k4_td2_td3 delta_clip ADD — 逐 client delta 范数裁剪（防重尾离群 client 毒化聚合；0=off）
+DELTA_CLIP="${DELTA_CLIP:-1.0}"
 GPU="${GPU:-2}"
 cd "$REPO"
 LOG_BASE="$REPO/temp/logs"; RUN_DIR="$LOG_BASE/k4_td2_td3_$(date +%y%m%d-%H%M%S)"; mkdir -p "$RUN_DIR"
@@ -84,6 +86,6 @@ echo "[$(date +%H:%M:%S)] STEP td3 start lr=$LR rounds=$ROUNDS eval_every=1"
   --lora-r 1 --lora-alpha 2 \
   --zo-subspace layers --zo-layer-rotate --zo-layer-group 4 \
   --max-clients 30 --local-steps 2 --zo-directions 22 --zo-eps 1e-3 \
-  --rounds "$ROUNDS" --eval-every 1 --lr "$LR" \
+  --rounds "$ROUNDS" --eval-every 1 --lr "$LR" --delta-clip "$DELTA_CLIP" \
   --out-root "$ZOO_ROOT"
 echo "[$(date +%H:%M:%S)] STEP ALL DONE"

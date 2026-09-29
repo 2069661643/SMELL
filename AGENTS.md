@@ -65,7 +65,7 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 
 - **260929 审计修复（两条致命链路 + 一条隐藏项）**：① `run_fed` 的 ZOO 在 `model.train()` 下做有限差分 → dropout=0.1 吞掉差分（grad norm 差 1.3e-5 倍，历史 lr=1e-3 NaN 由此解释）；② 评测从不加载 predictor（随机 predictor 剪枝），且推理侧 predictor bias 随机（训练侧 `bias=False`）→ 已修复：ZOO 强制 eval、ppl 接 `--predictor/--attn/--dtype`、缺 bias 零填充、其余缺 key 报错。**历史 ZOO 运行与 G-PPL 曲线全部作废**。详见 ailog `260929-000200`。
 - **step5 predictor 已重训**（client 分布 a01+a03，400 步；sha256 见 `docs/weight-manifest.md`）；16k×4 实测：step5 answer_ppl 1056 vs random 1762，dense 585。
-- **TD-3@a03 二次重启（lr=0.15）**：首启（`zoo_k4_sparse_causal_a03_step5`）因 lr clamp 1e-4 把校准值 0.15 夹低 1500× → 13 轮空转（loss/PPL 恒定、配对检验 ns，**作废**）。D 扫描（`temp/lr_scan`，lr 0.01–0.3）：δ∝lr 线性、0.3 档无 NaN、loss 随 lr 单调下降 ⇒ 修 clamp（`[1e-7,1.0]`+触界告警）后按 **lr=0.15** 重跑，产物 `logs/fed/zoo_k4_sparse_causal_a03_lr0.15/`（每轮逐样本，`scripts/paired_eval.py` 可检验）。
+- **TD-3@a03 三次启动（lr=0.15 + delta-clip 1.0）**：首启（`zoo_k4_sparse_causal_a03_step5`）因 lr clamp 1e-4 夹低 1500× → 13 轮空转作废；二启（`zoo_k4_sparse_causal_a03_lr0.15`）**round 0 被单离群 client（client_22 δ=2.43e4）毒化爆炸**（PPL 33.7→10752→33254，2 轮留档作废）——根因=ZOO 有限差分重尾 + 无裁剪聚合（详见 ailog `260929-111500`）。已加 **`--delta-clip 1.0`**（逐 client 范数裁剪，`clipped_clients` 入 metrics）重跑，产物 `logs/fed/zoo_k4_sparse_causal_a03_lr0.15_clip/`（每轮逐样本）。**首轮检查点：clipped_clients 预期=1**。
 - **BP k-scan 已出**：收敛随覆盖单调（k=1 −0.038 / k=4 −0.169 / k=12 −0.280，同轮 0–32）；k=4 rotate4 sparsity ZOO 为 TD-3 口径（L2 D22, c30）。
 - 云端：**须停止旧 TD-3、pull 本分支后按同参数重跑**（旧运行是 dropout 噪声 + 随机 predictor）。
 - 检查入口：`temp/logs/last_k4_td2_td3_dir.txt` → `driver.log`；**读 `metrics.jsonl`（driver.log 有块缓冲）**。
@@ -174,6 +174,7 @@ $PY src/fed/run_fed.py --tag a01 --gpu 1 --trainer zoo --catv off \
 |---|---|
 | `docs/weight-manifest.md`（非 ailog） | **换机交接清单**：权重/数据路径 + sha256 + TD-2'/TD-3 运行 flags |
 | `docs/ailog/260929-000200-...audit-fixes-step5-predictor.md` | **审计修复（必读）**：ZOO dropout / 评测随机 predictor / bias 零填充 + step5 predictor |
+| `docs/ailog/260929-111500-...td3-outlier-explosion-delta-clip.md` | **离群爆炸 + delta-clip**：client_22 δ=2.4e4 毒化聚合的根因与 `--delta-clip 1.0` 修复 |
 | `docs/ailog/260928-110233-...predictor-rootcause-noncausal-target-causal-fix.md` | **predictor causal 修复（step4 唯一可用）**：Jenga 非 causal target 对 OPT 不适配 |
 | `docs/ailog/260928-004251-...fix-ol2-prune-fallback-wire-fp32-sdpa-launch-k4-td3.md` | sdpa_prune 末层 O(L²) 修复、run_fed `--attn/--dtype`、k-scan 结论与 TD-3 |
 | `docs/ailog/260927-194011-...handoff.md` | ZOO 精度根因 + fp32 SDPA 修复、运行队列（上一轮交接） |

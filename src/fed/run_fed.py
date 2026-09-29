@@ -53,6 +53,9 @@ def parse_args():
     # SMELL 3 run_fed trainer ADD — zoo=前向梯度本地更新（默认）；bp=标准反传本地训练（Step 3 机制去风险）
     parser.add_argument("--trainer", choices=("zoo", "bp"), default="zoo")
     parser.add_argument("--bp-clip", type=float, default=1.0, help="BP grad clip norm; <=0 disables clipping")
+    # SMELL 3 run_fed delta_clip ADD — 逐 client delta 全局 L2 范数裁剪（防重尾离群 client 毒化 FedAvg；0=off）
+    parser.add_argument("--delta-clip", type=float, default=1.0,
+                        help="per-client delta L2 norm clip before aggregation; <=0 disables")
     # SMELL 3 run_fed rank_rotation ADD — LoRA 秩调度：all=旧行为；rotate=每轮激活 rank_k 个秩轮换；lock=固定前 rank_k 秩
     parser.add_argument("--rank-mode", choices=("all", "rotate", "lock"), default="all")
     parser.add_argument("--rank-k", type=int, default=1, help="每轮激活秩数（>0；rotate/lock 生效）")
@@ -369,6 +372,8 @@ def main():
     # SMELL 3 run_fed rank_rotation ADD — rank_k 必须为正
     if args.rank_k <= 0:
         raise SystemExit(f"--rank-k must be > 0, got {args.rank_k}")
+    if args.delta_clip < 0:
+        raise SystemExit(f"--delta-clip must be >= 0, got {args.delta_clip}")
     # SMELL 3 run_fed subspace_zo BEGIN — 子空间 ZO 参数校验、与秩轮换互斥、解析选择串
     if args.zo_subspace != "all" and args.rank_mode != "all":
         raise SystemExit(
@@ -627,7 +632,17 @@ def main():
                                   active_index=active_index, active_ranks=active_ranks)
             result = runner.run(iter_batches(input_ids_np, num_samples, model.device,
                                              truncate=args.truncate))
-            deltas.append(result["delta"])
+            # SMELL 3 run_fed delta_clip BEGIN — 逐 client delta 范数裁剪：重尾 ZO 估计的离群 client（如 δ=2.4e4）
+            # 在 FedAvg 里会直接毒化全局模型；按范数缩放保方向、只裁离群（审计 260929-110000）
+            client_delta = result["delta"]
+            raw_norm = delta_norm(client_delta)
+            delta_clipped = False
+            if args.delta_clip > 0 and raw_norm > args.delta_clip:
+                scale = args.delta_clip / raw_norm
+                client_delta = {key: value * scale for key, value in client_delta.items()}
+                delta_clipped = True
+            # SMELL 3 run_fed delta_clip END
+            deltas.append(client_delta)
             counts.append(num_samples)
             losses.append(result["train_loss"])
             # SMELL 3 run_fed per_module_delta ADD — 逐层/逐投影拆解 client δ 范数
@@ -636,7 +651,8 @@ def main():
                 "samples": num_samples,
                 "steps": result["steps"],
                 "train_loss": result["train_loss"],
-                "delta_norm": delta_norm(result["delta"]),
+                "delta_norm": raw_norm,
+                "delta_clip_applied": delta_clipped,
                 "delta_norm_by_layer": delta_by_layer,
                 "delta_norm_by_module": delta_by_module,
             }
@@ -661,6 +677,8 @@ def main():
             if valid else None
         )
         norms = [stats["delta_norm"] for stats in client_stats.values()]
+        # SMELL 3 run_fed delta_clip ADD — 本轮被裁剪的 client 数（诊断重尾离群）
+        clipped_clients = sum(1 for stats in client_stats.values() if stats["delta_clip_applied"])
         # SMELL 3 run_fed per_module_delta ADD — 各层 δ 范数的跨 client 均值（缺失层按 0 计）
         layer_keys = sorted(
             {key for stats in client_stats.values() for key in stats["delta_norm_by_layer"]},
@@ -681,6 +699,7 @@ def main():
             "delta_norm_mean": sum(norms) / len(norms),
             "delta_norm_min": min(norms),
             "delta_norm_max": max(norms),
+            "clipped_clients": clipped_clients,
             # SMELL 3 run_fed per_module_delta ADD — 逐层 δ 范数跨 client 均值
             "delta_norm_by_layer_mean": delta_norm_by_layer_mean,
             # SMELL 3 run_fed zo_layer_rotate ADD — 本轮实际激活层（rotate=轮转集合；固定 layers=zo_layers）
@@ -737,7 +756,7 @@ def main():
         # SMELL 3 run_fed catv mask END
         append_metrics(metrics_path, record)
         print(f"[fed] round {round_idx}/{args.rounds - 1} loss={train_loss_mean} "
-              f"delta_norm={record['delta_norm_mean']:.4e} "
+              f"delta_norm={record['delta_norm_mean']:.4e} clipped={clipped_clients} "
               f"cos={record['cos_mean_sampled']} time={record['round_seconds']:.1f}s "
               # SMELL 3 run_fed rank_rotation ADD — 打印本轮激活秩/通信量
               f"active_ranks={active_ranks} comm_bytes={record['communication_bytes']} "
