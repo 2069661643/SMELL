@@ -50,11 +50,15 @@ def parse_args():
     ap.add_argument("--tokenizer", default=TOKENIZER_PATH)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--global-demo-frac", type=float, default=0.15, help="train share held out of client pools (Discovery semantics)")
+    ap.add_argument("--global-val-frac", type=float, default=0.1, help="share of held-out train pool encoded as global_val (rest = global_train)")
+    ap.add_argument("--no-global-pool", action="store_true", help="skip encoding held-out train pool into global_train/global_val")
     ap.add_argument("--max-source-docs", type=int, default=0, help="streaming row cap per split; 0 = no limit")
     ap.add_argument("--mini", action="store_true", help="4 clients x 5 train x 2 local, global 10, seq_len 2048, cap 300 docs")
     args = ap.parse_args()
     if not 0.0 < args.head_frac < 1.0:
         raise SystemExit(f"--head-frac must be in (0,1), got {args.head_frac}")
+    if not 0.0 < args.global_val_frac < 1.0:
+        raise SystemExit(f"--global-val-frac must be in (0,1), got {args.global_val_frac}")
     if args.mini:
         args.clients = 4
         args.train_per_client = 5
@@ -147,6 +151,12 @@ def length_stats(lengths, seq_len):
         "truncated": int(np.sum(lengths >= seq_len)),
         "rows": int(lengths.shape[0]),
     }
+
+
+# SMELL 3 build_arxiv_16k label_histogram ADD — 标签计数直方图（按 label_names 顺序，JSON 友好 dict）
+def label_histogram(labels, label_names):
+    counts = np.bincount(labels, minlength=len(label_names))
+    return {name: int(c) for name, c in zip(label_names, counts)}
 
 
 def write_split(dirpath, prefix, ids, labels, lengths):
@@ -282,6 +292,69 @@ def main():
     total_sequences += args.global_test
     log(f"global_test done: n={args.global_test} from test rows={seen} elapsed={time.time() - t0:.1f}s")
 
+    # SMELL 3 build_arxiv_16k global_pool ADD — 预留 train 池（global_demo_source）编码为 Step 1 全局训练/验证集
+    global_pool_meta = {
+        "source": "train(global_demo_idx)",
+        "val_frac": args.global_val_frac,
+        "train": 0,
+        "val": 0,
+        "skipped": bool(args.no_global_pool),
+    }
+    global_train_lengths = None
+    global_val_lengths = None
+    if args.no_global_pool:
+        log(f"global pool skipped: --no-global-pool held_out={len(global_demo_source)} elapsed={time.time() - t0:.1f}s")
+    else:
+        gpool_idx = np.asarray(global_demo_source, dtype=np.int64)
+        n_gpool = int(gpool_idx.shape[0])
+        n_gval = int(np.floor(args.global_val_frac * n_gpool + 0.5))
+        if not 0 < n_gval < n_gpool:
+            raise SystemExit(f"global val split n={n_gval} not in (0,{n_gpool}); adjust --global-val-frac")
+        order = np.random.default_rng([args.seed, 505]).permutation(n_gpool)
+        global_train_idx = gpool_idx[order[n_gval:]]
+        global_val_idx = gpool_idx[order[:n_gval]]
+        n_gtrain = int(global_train_idx.shape[0])
+        gslots = {}
+        for k, idx in enumerate(global_train_idx.tolist()):
+            assert int(idx) not in gslots, f"duplicate global train idx={idx}"
+            gslots[int(idx)] = ("global_train", k)
+        for k, idx in enumerate(global_val_idx.tolist()):
+            assert int(idx) not in gslots, f"duplicate global val idx={idx}"
+            gslots[int(idx)] = ("global_val", k)
+        assert len(gslots) == n_gtrain + n_gval, f"global pool slots={len(gslots)} != {n_gtrain + n_gval}"
+        global_train_ids = np.empty((n_gtrain, args.seq_len), dtype=np.uint16)
+        global_train_labels_arr = np.empty(n_gtrain, dtype=np.int64)
+        global_train_lengths = np.empty(n_gtrain, dtype=np.int32)
+        global_val_ids = np.empty((n_gval, args.seq_len), dtype=np.uint16)
+        global_val_labels_arr = np.empty(n_gval, dtype=np.int64)
+        global_val_lengths = np.empty(n_gval, dtype=np.int32)
+
+        def fill_global_pool(idx, text):
+            ids, length = encode_doc(tok, text, args.seq_len, args.head_frac, pad_id)
+            prefix, k = gslots[idx]
+            if prefix == "global_train":
+                global_train_ids[k] = ids
+                global_train_lengths[k] = length
+                global_train_labels_arr[k] = int(labels_all[idx])
+            else:
+                global_val_ids[k] = ids
+                global_val_lengths[k] = length
+                global_val_labels_arr[k] = int(labels_all[idx])
+
+        seen_g = stream_wanted("train", args.max_source_docs, set(gslots.keys()), fill_global_pool)
+        validate_matrix("global_train", global_train_ids, global_train_labels_arr, global_train_lengths, pad_id, n_classes)
+        validate_matrix("global_val", global_val_ids, global_val_labels_arr, global_val_lengths, pad_id, n_classes)
+        write_split(out_dir, "global_train", global_train_ids, global_train_labels_arr, global_train_lengths)
+        write_split(out_dir, "global_val", global_val_ids, global_val_labels_arr, global_val_lengths)
+        global_pool_meta.update({
+            "train": n_gtrain,
+            "val": n_gval,
+            "train_label_hist": label_histogram(global_train_labels_arr, label_names),
+            "val_label_hist": label_histogram(global_val_labels_arr, label_names),
+        })
+        log(f"global pool done: train={n_gtrain} val={n_gval} val_frac={args.global_val_frac} "
+            f"from train rows={seen_g} elapsed={time.time() - t0:.1f}s")
+
     counts = {
         "clients": args.clients,
         "train_per_client": n_train,
@@ -300,6 +373,10 @@ def main():
         "local_test": length_stats(np.concatenate(local_lengths_all), args.seq_len),
         "global_test": length_stats(global_lengths, args.seq_len),
     }
+    # SMELL 3 build_arxiv_16k global_pool ADD — 开启 global 池时补充 train/val 长度统计
+    if global_train_lengths is not None:
+        length_stats_all["global_train"] = length_stats(global_train_lengths, args.seq_len)
+        length_stats_all["global_val"] = length_stats(global_val_lengths, args.seq_len)
     fallback_reuse = {
         "per_client": reuse_per_client,
         "total_client_reuse": int(sum(reuse_per_client.values())),
@@ -322,6 +399,7 @@ def main():
         "label_names": label_names,
         "counts": counts,
         "length_stats": length_stats_all,
+        "global_pool": global_pool_meta,
         "fallback_reuse": fallback_reuse,
         "elapsed_sec": round(time.time() - t0, 1),
     }
