@@ -4,8 +4,8 @@
 # 设计（详细说明见 docs/ailog/260928-143659-smell-v3-gate-lr-pipeline-delivery.md）：
 #   1) TD-2'：scripts/diag_cos_grid.py 测 k=4 子空间（d_eff=4*8192=32768）在 fp32+sdpa_prune 下的稀疏 cos
 #   2) 门控：cos(k4,L2,D22,c30) >= COS_GATE（默认 0.05）才继续；否则 ~1.4h 时提前终止
-#   3) lr 校准：1 client/1 sample 探针（probe lr=4e-6）读 delta_norm
-#              -> lr = 4e-6 * TARGET_DNORM / delta_norm（TARGET_DNORM 默认 0.38 = BP k=4 参考；钳制 [1e-7, 1e-4]）
+#   3) lr 校准：1 client/2 samples 探针（probe lr=4e-6）读 delta_norm
+#              -> lr = 4e-6 * TARGET_DNORM / delta_norm（TARGET_DNORM 默认 0.38 = BP k=4 参考；钳制 [1e-7, 1.0]，触界告警）
 #   4) TD-3：run_fed --trainer zoo（rotate4, c30, L2, D22, fp32+sdpa_prune, 每轮 eval/save）
 #
 # 约束：predictor 必须用 causal 修复版（Jenga 原非 causal 目标会选尾部块）；ZOO 前向在 ClientRunner 内强制 eval（dropout=0.1 会吞差分）。
@@ -68,8 +68,13 @@ if ! awk "BEGIN{exit !($DN > 0)}"; then
   tail -n 5 "$PROBE_ROOT/driver.log" 2>/dev/null
   exit 1
 fi
-LR=$("$PY" -c "d=float('$DN'); print(min(max(4e-6*$TARGET_DNORM/d,1e-7),1e-4))")
-echo "[$(date +%H:%M:%S)] STEP lr_calibrated=$LR (target delta_norm=$TARGET_DNORM)"
+LR_RAW=$("$PY" -c "d=float('$DN'); print(4e-6*$TARGET_DNORM/d)")
+LR=$("$PY" -c "raw=float('$LR_RAW'); print(min(max(raw,1e-7),1.0))")
+# SMELL 3 run_k4_td2_td3 lr_clamp FIXED — 上界 1e-4 曾把校准值 0.15 夹低 1500×（TD-3 空转 13 轮）；放宽到 1.0 并告警
+if awk "BEGIN{exit !(($LR_RAW) < 1e-7 || ($LR_RAW) > 1.0)}"; then
+  echo "[$(date +%H:%M:%S)] STEP WARNING lr_clamped raw=$LR_RAW -> $LR (check probe/delta)"
+fi
+echo "[$(date +%H:%M:%S)] STEP lr_calibrated=$LR (raw=$LR_RAW target delta_norm=$TARGET_DNORM)"
 
 # ---- Stage 3: TD-3 k=4 sparsity ZOO（rotate4, L2 D22, c30, eval/save 每轮） ----
 echo "[$(date +%H:%M:%S)] STEP td3 start lr=$LR rounds=$ROUNDS eval_every=1"
