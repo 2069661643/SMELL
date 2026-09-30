@@ -66,6 +66,7 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 - **260929 审计修复（两条致命链路 + 一条隐藏项）**：① `run_fed` 的 ZOO 在 `model.train()` 下做有限差分 → dropout=0.1 吞掉差分（grad norm 差 1.3e-5 倍，历史 lr=1e-3 NaN 由此解释）；② 评测从不加载 predictor（随机 predictor 剪枝），且推理侧 predictor bias 随机（训练侧 `bias=False`）→ 已修复：ZOO 强制 eval、ppl 接 `--predictor/--attn/--dtype`、缺 bias 零填充、其余缺 key 报错。**历史 ZOO 运行与 G-PPL 曲线全部作废**。详见 ailog `260929-000200`。
 - **step5 predictor 已重训**（client 分布 a01+a03，400 步；sha256 见 `docs/weight-manifest.md`）；16k×4 实测：step5 answer_ppl 1056 vs random 1762，dense 585。
 - **TD-3@a03（lr=0.15 + delta-clip 1.0）30 轮完成（260930 09:35）**：**full PPL 33.654→33.285（−1.10%，30 点全单调；r0 vs r29 配对 p≈0）——首个 ZOO 正结果**；answer NLL +6.7%（单调退化，诊断队列：dense 对照/E2–E5/BP 对照）。51 个 client-轮被 clip（1.7/轮），无 NaN/爆炸。配置与复现：ailog `260930-094100`；产物 `logs/fed/zoo_k4_sparse_causal_a03_lr0.15_clip/`；报告 `temp/logs/td3_a03_lr015_clip_report.txt`。
+- **dense 对照（260930，关键）**：同一 adapter 在 dense 口径（`--sparse 1.0`）下 answer PPL **−12.2%（改善）** vs sparse +6.4% ⇒ **answer 退化 = frozen predictor 选块漂移**，非训练失败。下一步：**Step1 选择漂移量化 → Step2 predictor 刷新（数据隔离：只用 client train 分片，挂 r29 adapter）→ Step3 E2/E3**；实现细节与命令见 handoff ailog **`260930-100000`**。
 - **BP k-scan 已出**：收敛随覆盖单调（k=1 −0.038 / k=4 −0.169 / k=12 −0.280，同轮 0–32）；k=4 rotate4 sparsity ZOO 为 TD-3 口径（L2 D22, c30）。
 - 云端：**须停止旧 TD-3、pull 本分支后按同参数重跑**（旧运行是 dropout 噪声 + 随机 predictor）。
 - 检查入口：`temp/logs/last_k4_td2_td3_dir.txt` → `driver.log`；**读 `metrics.jsonl`（driver.log 有块缓冲）**。
@@ -176,6 +177,7 @@ $PY src/fed/run_fed.py --tag a01 --gpu 1 --trainer zoo --catv off \
 | `docs/ailog/260929-000200-...audit-fixes-step5-predictor.md` | **审计修复（必读）**：ZOO dropout / 评测随机 predictor / bias 零填充 + step5 predictor |
 | `docs/ailog/260929-111500-...td3-outlier-explosion-delta-clip.md` | **离群爆炸 + delta-clip**：client_22 δ=2.4e4 毒化聚合的根因与 `--delta-clip 1.0` 修复 |
 | `docs/ailog/260930-094100-...td3-a03-lr015-clip-first-success.md` | **首个 ZOO 正结果**：lr=0.15 + clip 1.0 的完整配置与 30 轮结果（full PPL −1.1%；answer +6.7% caveat）|
+| `docs/ailog/260930-100000-...handoff-dense-diag-next-steps.md` | **最新交接（下一个 session 先读）**：dense 对照发现 + 1→2→E2/E3 实现要点与数据隔离约束 |
 | `docs/ailog/260928-110233-...predictor-rootcause-noncausal-target-causal-fix.md` | **predictor causal 修复（step4 唯一可用）**：Jenga 非 causal target 对 OPT 不适配 |
 | `docs/ailog/260928-004251-...fix-ol2-prune-fallback-wire-fp32-sdpa-launch-k4-td3.md` | sdpa_prune 末层 O(L²) 修复、run_fed `--attn/--dtype`、k-scan 结论与 TD-3 |
 | `docs/ailog/260927-194011-...handoff.md` | ZOO 精度根因 + fp32 SDPA 修复、运行队列（上一轮交接） |
