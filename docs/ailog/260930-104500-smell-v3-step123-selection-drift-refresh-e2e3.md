@@ -46,6 +46,17 @@
 - E3：θ±hν 两次前向的选块翻转数 **flips = 0.00**（3 client × 2 模式 × 4 方向 = 24 个方向对），相关不可计算。
 - **结论：r29/晚层没有选块翻转证据；离群重尾更可能是「特定轮 × 早期层」的稀发现象（r24 client_21 发生在 layers 0–3），需对准对应轮/层状态复现。**
 
+## 追加（10:47）：dense r0/r29 配对检验（同 adapter，仅 sparse=1.0）
+
+| 口径 | answer ΔNLL（r0→r29） | answer ratio | full ΔNLL | full ratio |
+|---|---|---|---|---|
+| sparse 0.4（step5） | **+0.0650**（p=8.4e-68，REGRESSED） | 1.0671 | −0.0110（p≈0，IMPROVED） | 0.9890 |
+| dense 1.0 | **−0.1383**（p=2.6e-103，IMPROVED） | 0.8709 | −0.0154（p≈0，IMPROVED） | 0.9847 |
+
+- 同一 adapter（r000/r029，训练走 sparse）在两种评测口径下 answer 方向相反且均显著 ⇒ answer 变化是**评测口径 × 训练状态交互**：sparse 路径 r0 绝对值领先（1744 vs 3594）但训练后回退；dense 持续改善。
+- 与 Step 1（漂移小）、Step 2（refresh 仅 −0.67%）一致：answer 退化不是 predictor 老化/选块漂移所致；继续查「选块丢失的 KV 对 answer 的影响 + 目标加权」。
+- 配对文件：`temp/diag_compare/paired_sparse_r0_r29_*.json`、`temp/diag_dense_eval/paired_r0_r29_*.json`。
+
 ## 影响 / 下一步候选
 
 1. answer 退化的候选主因回到**训练目标 token 均值淹没 answer**（answer ≈3 token / 16384），可做 E4/E5 或 answer 加权 loss 实验。
