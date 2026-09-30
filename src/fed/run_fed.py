@@ -296,11 +296,11 @@ def sample_pairwise_cos(deltas, max_clients=5):
     return (sum(values) / len(values)) if values else None
 
 
-def run_global_eval(args, model, out_dir, metrics_path, round_idx):
+def run_global_eval(args, model, out_dir, metrics_path, round_idx, adapter_ready=False):
     from src.fed.serial_fedavg import append_metrics
     adapter_dir = out_dir / f"adapter_round{round_idx:03d}"
-    # SMELL 3 run_fed eval_adapter_reuse ADD — save-every 已落盘则复用，避免 eval 时重复保存
-    if not adapter_dir.exists():
+    # SMELL 3 run_fed eval_adapter_reuse MODIFIED — 仅复用本轮 save 刚落盘的 adapter；否则必存（覆盖同 out-root 旧文件，防静默评旧权重，audit 260930-122106 R4）
+    if not adapter_ready:
         model.save_pretrained(str(adapter_dir))
     # SMELL 3 run_fed eval_lora_checkpoint ADD — 记录每次 eval 保存的 LoRA checkpoint 路径
     eval_out = out_dir / f"eval_round{round_idx:03d}.json"
@@ -466,6 +466,7 @@ def main():
         config.attn_implementation = args.attn
     # SMELL 3 run_fed predictor BEGIN — 载入 pruned_config 并在建模前挂到 config（OPTAttention 据此重建剪枝形状）
     predictor_loaded = 0
+    predictor_zero_filled = 0  # SMELL 3 run_fed predictor_zero_filled FIXED — 未传 --predictor 时 config 落盘不再 UnboundLocalError（audit 260930-122106 P0）
     if args.predictor:
         pruned_path = resolve(args.pruned_config)
         pruned_payload = torch.load(pruned_path, map_location="cpu")
@@ -775,7 +776,8 @@ def main():
               f"active_layers={round_active_layers}")
 
         # SMELL 3 run_fed save_every ADD — 每 N 轮存 adapter（秒级），与 eval（分钟级）解耦
-        if args.save_every > 0 and (round_idx + 1) % args.save_every == 0:
+        save_due = args.save_every > 0 and (round_idx + 1) % args.save_every == 0
+        if save_due:
             saved_dir = out_dir / f"adapter_round{round_idx:03d}"
             model.save_pretrained(str(saved_dir))
             append_metrics(metrics_path, {
@@ -785,7 +787,7 @@ def main():
             print(f"[fed] save round {round_idx} lora_checkpoint={saved_dir}")
 
         if args.eval_every > 0 and (round_idx + 1) % args.eval_every == 0:
-            run_global_eval(args, model, out_dir, metrics_path, round_idx)
+            run_global_eval(args, model, out_dir, metrics_path, round_idx, adapter_ready=save_due)
 
     # SMELL 3 run_fed peak_mem ADD — 报告 CUDA 峰值显存（8GB 卡 BP smoke 的 OOM 判据）
     if torch.cuda.is_available():
