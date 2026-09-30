@@ -1,7 +1,7 @@
 # SMELL v3 权重 / 数据清单（交接用）
 
 - 生成日期：2026-09-28；仓库根：`/home/yangyongbo/projects/smell/SMELLv3`（下称 `$REPO`）
-- Git：`git@github.com:2069661643/SMELL.git`，分支 `exp/rank-rotation-lora` @ `dfea2bc`
+- Git：`git@github.com:2069661643/SMELL.git`，分支 `exp/rank-rotation-lora`（260930 @ `b904a07`+）
 - **重要**：`checkpoints/`、`dataset_v3/`、`third_party/Jenga/checkpoints/` 均在 `.gitignore`，**不在 GitHub**，需用 rsync/scp 单独传输。本文件（`docs/weight-manifest.md`）随 git 一起走。
 
 ## 1. 必需产物（USE）
@@ -24,6 +24,8 @@
 |---|---|---|---|
 | pos_lora 位置表（备用变体） | `checkpoints/posemb_step1/a01_pos_lora_500step/pos_embed.pt` | 33M | `ac6a30a30d3965aaaac9f145258683921b3733ad64335e1e73bd6138a9e665e6` |
 | pos_lora adapter（备用） | `checkpoints/posemb_step1/a01_pos_lora_500step/adapter/adapter_model.safetensors` | 6.3M | `aee8c195fafa77fc28fcf22c8fb4fe964a7b2c7d28bd3127d02a3c2debb7b24d` |
+| r29 刷新 predictor（实验：answer −0.67%，p=0.014，未闭环；见 ailog `260930-104500`） | `checkpoints/predictor/refresh_r29_a01a03/predictor.pth` | 102M | `3d3dd15dfbdc0deac609faac7df3aaaf270fce7a792c6060412ae998fafdc1f2` |
+| 刷新配对 pruned_config（必须与上者成对） | `checkpoints/predictor/refresh_r29_a01a03/pruned_config.pth` | 1.9K | `784e0391e0fb26b86e1b32c22161760537a35a7664f1d127f03475cda393b7f3` |
 | predictor step2（**勿用**：非 causal，pos_lora） | `checkpoints/predictor/step2_a01_pos_lora/predictor.pth` | 99M | `02c84eab2aa491062aecc255fd34c0965dc2cc8b8398c79d4191579db60745d3` |
 | predictor step3（**勿用**：非 causal，pos_only） | `checkpoints/predictor/step3_a01_pos_only/predictor.pth` | 99M | `ec9ec761bf0bfdacfc580a2e7d56263382600ed17b1b9de0056c5831caf58237` |
 
