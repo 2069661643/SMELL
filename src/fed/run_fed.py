@@ -88,6 +88,9 @@ def parse_args():
     # SMELL 3 run_fed act_pack ADD — BP 默认旁路 Jenga 半丢弃 hooks（避免梯度静默污染）；ZOO 不受影响
     parser.add_argument("--act-pack", choices=("off", "on"), default="off")
     parser.add_argument("--eval-every", type=int, default=0, help="0 = off; else run ppl.py every N rounds")
+    # SMELL 3 run_fed save_every ADD — 每 N 轮存 adapter（秒级），与 eval（分钟级）解耦
+    parser.add_argument("--save-every", type=int, default=1,
+                        help="save LoRA adapter every N rounds (0 = off; eval rounds always save)")
     parser.add_argument("--out-root", default="logs/fed")
     return parser.parse_args()
 
@@ -296,7 +299,9 @@ def sample_pairwise_cos(deltas, max_clients=5):
 def run_global_eval(args, model, out_dir, metrics_path, round_idx):
     from src.fed.serial_fedavg import append_metrics
     adapter_dir = out_dir / f"adapter_round{round_idx:03d}"
-    model.save_pretrained(str(adapter_dir))
+    # SMELL 3 run_fed eval_adapter_reuse ADD — save-every 已落盘则复用，避免 eval 时重复保存
+    if not adapter_dir.exists():
+        model.save_pretrained(str(adapter_dir))
     # SMELL 3 run_fed eval_lora_checkpoint ADD — 记录每次 eval 保存的 LoRA checkpoint 路径
     eval_out = out_dir / f"eval_round{round_idx:03d}.json"
     per_sample_out = out_dir / f"eval_round{round_idx:03d}_persample.json"
@@ -322,6 +327,9 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx):
     # SMELL 3 run_fed eval pos_checkpoint ADD — 评测须加载同一 pos_embed，否则位置表错位导致 G-PPL 失真
     if getattr(args, "pos_checkpoint", None):
         command += ["--pos-checkpoint", str(args.pos_checkpoint)]
+    # SMELL 3 run_fed eval_truncate ADD — smoke 时 eval 与训练用同一截断，避免全 16k 评测
+    if getattr(args, "truncate", 0) > 0:
+        command += ["--truncate", str(args.truncate)]
     proc = subprocess.run(command, cwd=str(REPO), capture_output=True, text=True)
     if proc.returncode != 0 or not eval_out.exists():
         append_metrics(metrics_path, {
@@ -765,6 +773,16 @@ def main():
               f"active_ranks={active_ranks} comm_bytes={record['communication_bytes']} "
               # SMELL 3 run_fed zo_layer_rotate ADD — 打印本轮激活层（rotate 核对用）
               f"active_layers={round_active_layers}")
+
+        # SMELL 3 run_fed save_every ADD — 每 N 轮存 adapter（秒级），与 eval（分钟级）解耦
+        if args.save_every > 0 and (round_idx + 1) % args.save_every == 0:
+            saved_dir = out_dir / f"adapter_round{round_idx:03d}"
+            model.save_pretrained(str(saved_dir))
+            append_metrics(metrics_path, {
+                "event": "save", "round": round_idx, "trainer": args.trainer,
+                "lora_checkpoint": str(saved_dir),
+            })
+            print(f"[fed] save round {round_idx} lora_checkpoint={saved_dir}")
 
         if args.eval_every > 0 and (round_idx + 1) % args.eval_every == 0:
             run_global_eval(args, model, out_dir, metrics_path, round_idx)
