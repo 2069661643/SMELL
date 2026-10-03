@@ -73,9 +73,9 @@ for i in "${!NAMES[@]}"; do
   [[ -n "$POS_CKPT" ]] && extra+=(--pos-checkpoint "$POS_CKPT")
   [[ -n "$ADAPTER_INIT" ]] && extra+=(--adapter-init "$ADAPTER_INIT")
 
-  # SMELL 3 run_ablation_cloud catv_prune_guard ADD — CATV vote_callback 只在 flash 路径接线；未接线前禁止该组合（审计 260928）
-  if [[ "$catv" == "on" && "$ATTN" != "flash" ]]; then
-    echo "ABORT: CATV=on with --attn $ATTN not wired (vote callback only in flash); set ATTN=flash or wait for prune-path votes"
+  # SMELL 3 run_ablation_cloud catv_prune_guard MODIFIED — CATV 已接线 sdpa_prune（261003）；仅放行 flash|sdpa_prune
+  if [[ "$catv" == "on" && "$ATTN" != "flash" && "$ATTN" != "sdpa_prune" ]]; then
+    echo "ABORT: CATV=on with --attn $ATTN not wired (flash|sdpa_prune only)"
     exit 2
   fi
 

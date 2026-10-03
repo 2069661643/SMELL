@@ -51,6 +51,8 @@ def parse_args():
     parser.add_argument("--predictor", default=None)
     parser.add_argument("--pruned-config", default=None)
     parser.add_argument("--sparse", type=float, default=0.4)
+    # SMELL 3 ppl catv_mask ADD — CATV 评测加载 consensus_mask_roundN.pt（与训练同语义的锚掩码注入）
+    parser.add_argument("--catv-mask", default=None, help="consensus_mask_roundN.pt -> config.consensus_mask")
     parser.add_argument("--pos-mode", choices=("jenga_dup_scaled", "duplicate", "interpolate"),
                         default="jenga_dup_scaled")
     # SMELL 3 ppl pos_checkpoint ADD — 加载 longctx 适配后的 embed_positions 权重（2k 回归 / 16k 评测）
@@ -110,6 +112,11 @@ def build_model(args, effective_max_len):
         assert isinstance(pruned_payload, dict) and "layers" in pruned_payload, (
             f"unsupported pruned_config payload from {args.pruned_config}")
         config.predictor_layers = pruned_payload["layers"]
+    # SMELL 3 ppl catv_mask ADD — CATV 评测：载入服务器共识锚掩码（±inf 注入原始块分）
+    if args.catv_mask:
+        mask_payload = torch.load(resolve_path(args.catv_mask), map_location="cpu")
+        assert isinstance(mask_payload, dict), f"unsupported catv mask payload: {type(mask_payload)}"
+        config.consensus_mask = mask_payload
     model_cls = JengaOPTForCausalLM if attn == "flash" else SmellOPTForCausalLM
     model = model_cls.from_pretrained(args.model_dir, torch_dtype=dtype, config=config)
     if args.predictor:

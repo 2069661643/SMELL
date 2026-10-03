@@ -330,6 +330,10 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx, adapter_ready
     # SMELL 3 run_fed eval_truncate ADD — smoke 时 eval 与训练用同一截断，避免全 16k 评测
     if getattr(args, "truncate", 0) > 0:
         command += ["--truncate", str(args.truncate)]
+    # SMELL 3 run_fed eval_catv_mask ADD — CATV 评测用本轮最新共识锚掩码（最后一轮口径，见 ailog 261003）
+    mask_path = out_dir / f"consensus_mask_round{round_idx}.pt"
+    if getattr(args, "catv", "off") == "on" and mask_path.exists():
+        command += ["--catv-mask", str(mask_path)]
     proc = subprocess.run(command, cwd=str(REPO), capture_output=True, text=True)
     if proc.returncode != 0 or not eval_out.exists():
         append_metrics(metrics_path, {
@@ -369,10 +373,10 @@ def main():
             raise SystemExit(f"CATV requires 0 < r < s, got r={catv_r} s={args.sparse}")
         if args.sparse + catv_r > 1.0 + 1e-9:
             raise SystemExit(f"CATV requires s + r <= 1, got s={args.sparse} r={catv_r}")
-    # SMELL 3 run_fed catv_sdpa_guard ADD — CATV vote_callback 只在 flash 注意力里接线；sdpa/prune 下收不到票且 round0 会崩，提前 fail-fast
-    if catv_on and args.attn != "flash":
+    # SMELL 3 run_fed catv_sdpa_guard MODIFIED — CATV 已接线 flash 与 sdpa_prune（261003 移植，审计 4.2）；其余后端仍 fail-fast
+    if catv_on and args.attn not in ("flash", "sdpa_prune"):
         raise SystemExit(
-            f"--catv on requires --attn flash (vote callback is not wired for {args.attn})")
+            f"--catv on requires --attn flash|sdpa_prune (vote callback is not wired for {args.attn})")
 
     # SMELL 3 run_fed predictor ADD — predictor/pruned-config 必须成对提供
     if bool(args.predictor) != bool(args.pruned_config):
