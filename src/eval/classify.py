@@ -20,13 +20,31 @@ def parse_args():
     parser.add_argument("--split", choices=("global", "local"), default="global")
     parser.add_argument("--client", default=None, help="client id for --split local, e.g. 07")
     parser.add_argument("--pos-checkpoint", default=None, help="position_embeddings weight .pt")
+    # SMELL 3 classify head_checkpoint ADD — Step1 head.pt（FL 评测必需；缺失则头为随机初始化）
+    parser.add_argument("--head-checkpoint", default=None, help="Step1 head.pt (pre_classifier/classifier)")
     parser.add_argument("--adapter", default=None, help="optional PEFT adapter dir")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument("--dtype", choices=("fp32", "bf16"), default="fp32")
+    # SMELL 3 classify attn ADD — 与 run_fed 同后端：sdpa_prune 需 predictor+pruned_config（Jenga 真语义稀疏）
+    parser.add_argument("--attn", choices=("sdpa", "sdpa_prune", "eager"), default="sdpa")
+    # SMELL 3 classify predictor ADD — 训练后 predictor + 逐层形状（缺失时剪枝退化为随机打分）
+    parser.add_argument("--predictor", default=None, help="predictor.pth (requires --pruned-config)")
+    parser.add_argument("--pruned-config", default=None, help="pruned_config.pth")
+    # SMELL 3 classify catv ADD — 服务器共识锚掩码（与训练同轮口径；仅 sdpa_prune 路径生效）
+    parser.add_argument("--catv-mask", default=None, help="consensus_mask_roundNNN.pt")
+    # SMELL 3 classify persample ADD — 逐样本 NLL/正确性落盘（配对检验）
+    parser.add_argument("--per-sample-out", default=None)
+    # SMELL 3 classify sparse ADD — 与训练同 sparse（剪枝预算；0.4=Jenga 口径）
+    parser.add_argument("--sparse", type=float, default=0.4, help="block keep ratio for sdpa_prune")
     parser.add_argument("--truncate", type=int, default=0, help="testing only: use first N tokens")
     parser.add_argument("--out", default=None, help="JSON output path")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if bool(args.predictor) != bool(args.pruned_config):
+        raise SystemExit("--predictor and --pruned-config must be provided together")
+    if args.attn != "sdpa_prune" and (args.predictor or args.catv_mask):
+        raise SystemExit("--predictor/--catv-mask require --attn sdpa_prune")
+    return args
 
 
 def resolve_data_paths(args):
@@ -96,9 +114,18 @@ def main():
     effective_seq_len = args.truncate if args.truncate > 0 else int(input_ids_all.shape[1])
 
     model = load_distilbert_classifier(args.model_dir, num_labels=num_labels, dtype=args.dtype,
-                                       attn="sdpa", seq_len=effective_seq_len,
-                                       pos_checkpoint=args.pos_checkpoint)
+                                       attn=args.attn, seq_len=effective_seq_len,
+                                       pos_checkpoint=args.pos_checkpoint,
+                                       head_checkpoint=args.head_checkpoint,
+                                       predictor=args.predictor,
+                                       pruned_config=args.pruned_config,
+                                       sparse=args.sparse)
     model = model.cuda().eval()
+    if args.catv_mask:
+        mask = torch.load(args.catv_mask, map_location="cpu")
+        assert isinstance(mask, dict), f"unsupported catv mask payload {type(mask).__name__}"
+        model.config.consensus_mask = {int(key): value for key, value in mask.items()}
+        print(f"[classify] catv mask loaded layers={sorted(model.config.consensus_mask)}")
     if args.adapter:
         from peft import PeftModel
         model = PeftModel.from_pretrained(model, args.adapter).eval()
@@ -115,6 +142,7 @@ def main():
 
     preds = []
     labels = []
+    per_sample = []
     nll_sum = 0.0
     n = 0
     batch_size = max(1, int(args.batch_size))
@@ -130,10 +158,15 @@ def main():
         chunk_labels = torch.from_numpy(labels_all[start:end].astype(np.int64))
         with torch.no_grad():
             logits = model(input_ids=chunk_ids.cuda(), attention_mask=attention_mask.cuda()).logits.float()
-        nll_sum += float(torch.nn.functional.cross_entropy(
-            logits, chunk_labels.cuda(), reduction="sum").item())
-        preds.extend(logits.argmax(dim=-1).cpu().tolist())
+        # SMELL 3 classify persample ADD — 逐样本 NLL（reduction=none）与是否正确
+        chunk_nll = torch.nn.functional.cross_entropy(logits, chunk_labels.cuda(), reduction="none")
+        chunk_pred = logits.argmax(dim=-1)
+        nll_sum += float(chunk_nll.sum().item())
+        preds.extend(chunk_pred.cpu().tolist())
         labels.extend(chunk_labels.tolist())
+        for index in range(int(chunk_labels.numel())):
+            per_sample.append({"nll": float(chunk_nll[index].item()),
+                               "correct": bool(int(chunk_pred[index].item()) == int(chunk_labels[index].item()))})
         n += int(chunk_labels.numel())
 
     n_classes = max(num_labels, max(labels) + 1, max(preds) + 1)
@@ -149,6 +182,11 @@ def main():
         "model_dir": str(args.model_dir),
         "adapter": args.adapter,
         "pos_checkpoint": args.pos_checkpoint,
+        "head_checkpoint": args.head_checkpoint,
+        "attn": args.attn,
+        "predictor": args.predictor,
+        "pruned_config": args.pruned_config,
+        "catv_mask": args.catv_mask,
         "input_ids": str(ids_path),
         "labels": str(labels_path),
         "lengths": str(lengths_path) if lengths_path.exists() else None,
@@ -167,6 +205,11 @@ def main():
         "nll": mean_nll,
         "label_names": label_names,
     }
+    if args.per_sample_out:
+        per_sample_path = Path(args.per_sample_out)
+        per_sample_path.parent.mkdir(parents=True, exist_ok=True)
+        per_sample_path.write_text(json.dumps(per_sample, indent=2), encoding="utf-8")
+        print(f"[classify] wrote {per_sample_path} n={len(per_sample)}")
     if args.out:
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)

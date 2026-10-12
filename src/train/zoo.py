@@ -70,8 +70,12 @@ def build_param_index(model, layers=None, modules=None):
     offset = 0
     for name, param in named:
         numel = int(param.numel())
-        by_layer = any(f"layers.{layer}." in name for layer in layer_keys)
-        by_module = any(f"layers.{layer}.self_attn.{proj}." in name for layer, proj in module_keys)
+        # SMELL 3 zoo subspace_index arch MODIFIED — 兼容 OPT `layers.N.self_attn.*` 与 DistilBERT `layer.N.attention.*`
+        by_layer = any((f"layers.{layer}." in name) or (f"layer.{layer}." in name)
+                       for layer in layer_keys)
+        by_module = any((f"layers.{layer}.self_attn.{proj}." in name)
+                        or (f"layer.{layer}.attention.{proj}." in name)
+                        for layer, proj in module_keys)
         if by_layer or by_module:
             indices.extend(range(offset, offset + numel))
         offset += numel

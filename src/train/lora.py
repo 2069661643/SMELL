@@ -10,9 +10,11 @@ def build_lora_model(
     targets=("q_proj", "k_proj", "v_proj", "out_proj"),
     lora_alpha=16,
     dropout=0.0,
+    task_type=TaskType.CAUSAL_LM,
 ):
+    # SMELL 3 lora task_type ADD — DistilBERT 分类流水线复用该工厂（task_type=SEQ_CLS，目标模块 q_lin/k_lin/v_lin/out_lin）
     config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
+        task_type=task_type,
         r=r,
         lora_alpha=lora_alpha,
         lora_dropout=dropout,

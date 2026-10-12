@@ -19,16 +19,25 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 DEFAULT_MODEL_DIR = REPO / "third_party" / "Jenga" / "checkpoints" / "opt-350m"
+# SMELL 3 run_fed arch ADD — DistilBERT 分支模型目录/LoRA 目标/默认数据根
+DISTILBERT_MODEL_DIR = REPO / "third_party" / "Jenga" / "checkpoints" / "distilbert-base-uncased"
+DISTILBERT_DATA_ROOT = "dataset_v3/arxiv_16k"
 LORA_TARGETS = ["q_proj", "k_proj", "v_proj", "out_proj"]
+LORA_TARGETS_DISTILBERT = ["q_lin", "k_lin", "v_lin", "out_lin"]
 # SMELL 3 CATV block size ADD — Jenga pool_size（16k / 64 = 256 块/层）
 BLOCK_SIZE = 64
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Serial FedAvg with ZOO+LoRA on Discovery 16k")
-    parser.add_argument("--data-root", default="dataset_v3/discovery_16k")
+    # SMELL 3 run_fed arch ADD — arch 分派：opt（旧行为）/ distilbert（arxiv 16k 分类）
+    parser.add_argument("--arch", choices=("opt", "distilbert"), default="opt")
+    parser.add_argument("--data-root", default=None, help="default: discovery_16k (opt) / arxiv_16k (distilbert)")
     parser.add_argument("--tag", default="a01")
-    parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR))
+    parser.add_argument("--model-dir", default=None, help="default: opt-350m / distilbert-base-uncased")
+    # SMELL 3 run_fed arch ADD — DistilBERT 分类头（Step1 训练，FL 冻结）与类别数
+    parser.add_argument("--head-checkpoint", default=None, help="Step1 head.pt (distilbert; required)")
+    parser.add_argument("--num-labels", type=int, default=11)
     parser.add_argument("--rounds", type=int, default=10)
     parser.add_argument("--local-steps", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -88,6 +97,9 @@ def parse_args():
     # SMELL 3 run_fed act_pack ADD — BP 默认旁路 Jenga 半丢弃 hooks（避免梯度静默污染）；ZOO 不受影响
     parser.add_argument("--act-pack", choices=("off", "on"), default="off")
     parser.add_argument("--eval-every", type=int, default=0, help="0 = off; else run ppl.py every N rounds")
+    # SMELL 3 run_fed eval_size ADD — 分类评测节流（distilbert）：样本上限与批大小（0=classify 默认）
+    parser.add_argument("--eval-max-samples", type=int, default=0, help="distilbert eval cap; 0 = all")
+    parser.add_argument("--eval-batch-size", type=int, default=0, help="distilbert eval batch; 0 = classify default")
     # SMELL 3 run_fed save_every ADD — 每 N 轮存 adapter（秒级），与 eval（分钟级）解耦
     parser.add_argument("--save-every", type=int, default=1,
                         help="save LoRA adapter every N rounds (0 = off; eval rounds always save)")
@@ -245,14 +257,39 @@ def iter_batches(input_ids_np, num_samples, device, truncate=0):
         yield row.unsqueeze(0).to(device)
 
 
+# SMELL 3 run_fed classification_batches ADD — DistilBERT 分类：逐样本 (input_ids, attention_mask, labels)
+def iter_classification_batches(client_dir, num_samples, device, truncate=0):
+    import torch
+    input_ids_np = np.load(Path(client_dir) / "train_input_ids.npy", mmap_mode="r")
+    labels_np = np.load(Path(client_dir) / "train_labels.npy")
+    lengths_path = Path(client_dir) / "train_lengths.npy"
+    if lengths_path.exists():
+        lengths_np = np.load(lengths_path).astype(np.int64)
+    else:
+        pad_id = 0
+        lengths_np = (np.asarray(input_ids_np) != pad_id).sum(axis=1).astype(np.int64)
+    for index in range(num_samples):
+        row = np.asarray(input_ids_np[index], dtype=np.int64)
+        if truncate > 0:
+            row = row[:truncate]
+        seq_len = int(row.shape[0])
+        length = int(min(max(int(lengths_np[index]), 1), seq_len))
+        input_ids = torch.from_numpy(row).unsqueeze(0).to(device)
+        attention_mask = (torch.arange(seq_len, device=device).view(1, -1) < length).long()
+        label = torch.tensor([int(labels_np[index])], dtype=torch.long, device=device)
+        yield (input_ids, attention_mask, label)
+
+
 def delta_norm(delta):
     import torch
     return float(sum(torch.sum(tensor.float() ** 2) for tensor in delta.values()) ** 0.5)
 
 
 # SMELL 3 run_fed per_module_delta BEGIN — 逐层/逐投影拆分 client δ 的 L2 范数（诊断 LoRA 更新分布）
-_LAYER_PATTERN = re.compile(r"layers\.(\d+)\.")
-_PROJ_PATTERN = re.compile(r"self_attn\.(q_proj|k_proj|v_proj|out_proj)\.")
+# SMELL 3 run_fed arch MODIFIED — 模式兼容 OPT（layers.N.self_attn.q_proj）与 DistilBERT（layer.N.attention.q_lin）
+_LAYER_PATTERN = re.compile(r"(?:layers|layer)\.(\d+)\.")
+_PROJ_PATTERN = re.compile(
+    r"(?:self_attn|attention)\.(q_proj|k_proj|v_proj|out_proj|q_lin|k_lin|v_lin|out_lin)\.")
 
 
 def _layer_sort_key(layer):
@@ -305,6 +342,56 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx, adapter_ready
     # SMELL 3 run_fed eval_lora_checkpoint ADD — 记录每次 eval 保存的 LoRA checkpoint 路径
     eval_out = out_dir / f"eval_round{round_idx:03d}.json"
     per_sample_out = out_dir / f"eval_round{round_idx:03d}_persample.json"
+    # SMELL 3 run_fed arch MODIFIED — distilbert 走分类评测（accuracy/NLL），opt 保持 ppl 口径
+    if args.arch == "distilbert":
+        command = [
+            sys.executable, str(REPO / "src" / "eval" / "classify.py"),
+            "--model-dir", args.model_dir,
+            "--data-root", str(resolve(args.data_root)),
+            "--tag", args.tag,
+            "--split", "global",
+            "--adapter", str(adapter_dir),
+            "--head-checkpoint", str(resolve(args.head_checkpoint)),
+            "--attn", "sdpa_prune" if args.attn == "sdpa_prune" else "sdpa",
+            "--sparse", str(args.sparse),
+            "--dtype", str(args.dtype),
+            "--out", str(eval_out),
+            "--per-sample-out", str(per_sample_out),
+        ]
+        if getattr(args, "predictor", None):
+            command += ["--predictor", str(resolve(args.predictor)),
+                        "--pruned-config", str(resolve(args.pruned_config))]
+        if getattr(args, "pos_checkpoint", None):
+            command += ["--pos-checkpoint", str(args.pos_checkpoint)]
+        if getattr(args, "truncate", 0) > 0:
+            command += ["--truncate", str(args.truncate)]
+        if getattr(args, "eval_max_samples", 0) > 0:
+            command += ["--max-samples", str(args.eval_max_samples)]
+        if getattr(args, "eval_batch_size", 0) > 0:
+            command += ["--batch-size", str(args.eval_batch_size)]
+        mask_path = out_dir / f"consensus_mask_round{round_idx}.pt"
+        if getattr(args, "catv", "off") == "on" and mask_path.exists():
+            command += ["--catv-mask", str(mask_path)]
+        proc = subprocess.run(command, cwd=str(REPO), capture_output=True, text=True)
+        if proc.returncode != 0 or not eval_out.exists():
+            append_metrics(metrics_path, {
+                "event": "eval", "round": round_idx, "status": "failed",
+                "returncode": proc.returncode, "stderr_tail": proc.stderr[-500:],
+                "trainer": args.trainer, "lora_checkpoint": str(adapter_dir),
+                "per_sample": str(per_sample_out),
+            })
+            print(f"[fed] eval round {round_idx} FAILED rc={proc.returncode}: {proc.stderr.strip()[-200:]}")
+            print(f"[fed] eval round {round_idx} lora_checkpoint={adapter_dir}")
+            return None
+        payload = json.loads(eval_out.read_text(encoding="utf-8"))
+        append_metrics(metrics_path, {"event": "eval", "round": round_idx, "status": "ok",
+                                      "trainer": args.trainer,
+                                      "lora_checkpoint": str(adapter_dir),
+                                      "per_sample": str(per_sample_out), **payload})
+        print(f"[fed] eval round {round_idx} accuracy={payload['accuracy']} nll={payload['nll']} "
+              f"macro_f1={payload['macro_f1']}")
+        print(f"[fed] eval round {round_idx} lora_checkpoint={adapter_dir}")
+        return payload
     command = [
         sys.executable, str(REPO / "src" / "eval" / "ppl.py"),
         "--model-dir", args.model_dir,
@@ -364,6 +451,18 @@ def main():
     args = parse_args()
     if args.gpu is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    # SMELL 3 run_fed arch defaults ADD — 未显式给出时按 arch 选择数据根/模型目录；distilbert 校验 attn/head
+    if args.data_root is None:
+        args.data_root = DISTILBERT_DATA_ROOT if args.arch == "distilbert" else "dataset_v3/discovery_16k"
+    if args.model_dir is None:
+        args.model_dir = str(DISTILBERT_MODEL_DIR if args.arch == "distilbert" else DEFAULT_MODEL_DIR)
+    if args.arch == "distilbert":
+        if args.attn in ("flash", "sdpa_gather"):
+            raise SystemExit(f"--arch distilbert does not support --attn {args.attn} (use sdpa/sdpa_prune)")
+        if not args.head_checkpoint:
+            raise SystemExit("--arch distilbert requires --head-checkpoint (Step1 head.pt)")
+        if args.act_pack == "on":
+            raise SystemExit("--act-pack is OPT-only (Jenga half-dropout hooks); distilbert has no pack hooks")
     # SMELL 3 run_fed catv REWRITTEN — 解析/校验 CATV 锚比例（r < s 且 s + r <= 1，默认 r = s/2）
     catv_on = args.catv == "on"
     catv_r = None
@@ -374,9 +473,11 @@ def main():
         if args.sparse + catv_r > 1.0 + 1e-9:
             raise SystemExit(f"CATV requires s + r <= 1, got s={args.sparse} r={catv_r}")
     # SMELL 3 run_fed catv_sdpa_guard MODIFIED — CATV 已接线 flash 与 sdpa_prune（261003 移植，审计 4.2）；其余后端仍 fail-fast
-    if catv_on and args.attn not in ("flash", "sdpa_prune"):
+    # SMELL 3 run_fed catv_arch MODIFIED — distilbert 仅 sdpa_prune 有 vote 回调（无 FA2）
+    allowed_catv_attn = ("sdpa_prune",) if args.arch == "distilbert" else ("flash", "sdpa_prune")
+    if catv_on and args.attn not in allowed_catv_attn:
         raise SystemExit(
-            f"--catv on requires --attn flash|sdpa_prune (vote callback is not wired for {args.attn})")
+            f"--catv on requires --attn {'|'.join(allowed_catv_attn)} (vote callback is not wired for {args.attn})")
 
     # SMELL 3 run_fed predictor ADD — predictor/pruned-config 必须成对提供
     if bool(args.predictor) != bool(args.pruned_config):
@@ -412,12 +513,14 @@ def main():
     # SMELL 3 run_fed subspace_zo END
 
     import torch
-    # SMELL 3 run_fed imports MODIFIED — 使用 src/ 可编辑的 OPT 拷贝（含 CATV 掩码注入）
-    from src.models.modeling_opt_smell import OPTForCausalLM
-    from jenga.utils.config_utils import get_opt_qk
+    # SMELL 3 run_fed imports MODIFIED — 使用 src/ 可编辑的 OPT 拷贝（含 CATV 掩码注入）；distilbert 分支按需导入
+    if args.arch == "opt":
+        from src.models.modeling_opt_smell import OPTForCausalLM
+        from jenga.utils.config_utils import get_opt_qk
+
+        from src.models.position_embed import ensure_positions
 
     from src.fed.serial_fedavg import ClientRunner, ServerAggregator, append_metrics, resolve_model_config
-    from src.models.position_embed import ensure_positions
     # SMELL 3 run_fed imports ADD — CATV 服务器端掩码计算与 IR 指标
     from src.models.token_selector import compute_consensus_mask, mask_intersection_rate
     from src.train.lora import (
@@ -433,7 +536,7 @@ def main():
     from src.train.zoo import build_active_index, build_param_index
 
     # SMELL 3 run_fed act_pack BEGIN — BP 旁路 Jenga modeling_opt 的 pack/unpack hooks（否则后一半 token 梯度被静默置零）
-    if args.trainer == "bp" and args.act_pack == "off":
+    if args.arch == "opt" and args.trainer == "bp" and args.act_pack == "off":
         import src.models.modeling_opt_smell as modeling
         modeling.pack_hook = lambda tensor: tensor
         modeling.unpack_hook = lambda tensor: tensor
@@ -464,48 +567,74 @@ def main():
 
     # SMELL 3 run_fed dtype_attn ADD — fp32 + SDPA(含 sdpa_prune) 接线：bf16 损失量化会吞掉 ZOO 有限差分信号，FA2 不支持 fp32
     model_dtype = {"bf16": torch.bfloat16, "fp32": torch.float32}[args.dtype]
-    config = get_opt_qk(model_name=args.model_dir, flash_attention=(args.attn == "flash"),
-                        pool_size=64, thresh=args.sparse)
-    if args.attn != "flash":
-        config.attn_implementation = args.attn
-    # SMELL 3 run_fed predictor BEGIN — 载入 pruned_config 并在建模前挂到 config（OPTAttention 据此重建剪枝形状）
     predictor_loaded = 0
     predictor_zero_filled = 0  # SMELL 3 run_fed predictor_zero_filled FIXED — 未传 --predictor 时 config 落盘不再 UnboundLocalError（audit 260930-122106 P0）
-    if args.predictor:
-        pruned_path = resolve(args.pruned_config)
-        pruned_payload = torch.load(pruned_path, map_location="cpu")
-        assert isinstance(pruned_payload, dict) and "layers" in pruned_payload, (
-            f"unsupported pruned_config payload from {pruned_path}")
-        config.predictor_layers = pruned_payload["layers"]
-        print(f"[fed] pruned_config loaded path={pruned_path} layers={len(config.predictor_layers)}")
-    # SMELL 3 run_fed dtype_attn MODIFIED — 由 args.dtype 决定 bf16/fp32（bf16 旧行为不变）
-    model = OPTForCausalLM.from_pretrained(args.model_dir, torch_dtype=model_dtype, config=config)
-    if args.predictor:
-        predictor_loaded, _, predictor_zero_filled = load_predictor_weights(model, resolve(args.predictor))
-    # SMELL 3 run_fed predictor END
-    # SMELL 3 run_fed base_config ADD — 保存 LoRA 包装前的 OPTConfig 引用（vote_callback/consensus_mask 挂载点）
-    base_config = model.config
-    model = ensure_positions(model, effective_seq_len)
-    # SMELL 3 run_fed pos_checkpoint BEGIN — warmup 位置表注入（LoRA 包装前）；checkpoint 更大时按行数扩展后精确形状校验
-    if args.pos_checkpoint:
-        pos_path = resolve(args.pos_checkpoint)
-        pos_payload = torch.load(pos_path, map_location="cpu")
-        if isinstance(pos_payload, dict):
-            pos_payload = pos_payload.get("weight", pos_payload)
-        assert torch.is_tensor(pos_payload), f"unsupported pos checkpoint payload: {type(pos_payload)}"
-        target_weight = model.model.decoder.embed_positions.weight
-        if tuple(pos_payload.shape) != tuple(target_weight.shape):
-            if (pos_payload.dim() == 2 and pos_payload.shape[1] == target_weight.shape[1]
-                    and pos_payload.shape[0] > target_weight.shape[0]):
-                pos_offset = int(model.model.decoder.embed_positions.offset)
-                model = ensure_positions(model, int(pos_payload.shape[0]) - pos_offset)
-                target_weight = model.model.decoder.embed_positions.weight
-        assert tuple(pos_payload.shape) == tuple(target_weight.shape), (
-            f"pos checkpoint shape {tuple(pos_payload.shape)} != embed_positions {tuple(target_weight.shape)}")
-        with torch.no_grad():
-            target_weight.copy_(pos_payload.to(device=target_weight.device, dtype=target_weight.dtype))
-        print(f"[fed] pos_checkpoint loaded path={pos_path} shape={tuple(target_weight.shape)}")
-    # SMELL 3 run_fed pos_checkpoint END
+    if args.arch == "opt":
+        config = get_opt_qk(model_name=args.model_dir, flash_attention=(args.attn == "flash"),
+                            pool_size=64, thresh=args.sparse)
+        if args.attn != "flash":
+            config.attn_implementation = args.attn
+        # SMELL 3 run_fed predictor BEGIN — 载入 pruned_config 并在建模前挂到 config（OPTAttention 据此重建剪枝形状）
+        if args.predictor:
+            pruned_path = resolve(args.pruned_config)
+            pruned_payload = torch.load(pruned_path, map_location="cpu")
+            assert isinstance(pruned_payload, dict) and "layers" in pruned_payload, (
+                f"unsupported pruned_config payload from {pruned_path}")
+            config.predictor_layers = pruned_payload["layers"]
+            print(f"[fed] pruned_config loaded path={pruned_path} layers={len(config.predictor_layers)}")
+        # SMELL 3 run_fed dtype_attn MODIFIED — 由 args.dtype 决定 bf16/fp32（bf16 旧行为不变）
+        model = OPTForCausalLM.from_pretrained(args.model_dir, torch_dtype=model_dtype, config=config)
+        if args.predictor:
+            predictor_loaded, _, predictor_zero_filled = load_predictor_weights(model, resolve(args.predictor))
+        # SMELL 3 run_fed predictor END
+        # SMELL 3 run_fed base_config ADD — 保存 LoRA 包装前的 OPTConfig 引用（vote_callback/consensus_mask 挂载点）
+        base_config = model.config
+        model = ensure_positions(model, effective_seq_len)
+        # SMELL 3 run_fed pos_checkpoint BEGIN — warmup 位置表注入（LoRA 包装前）；checkpoint 更大时按行数扩展后精确形状校验
+        if args.pos_checkpoint:
+            pos_path = resolve(args.pos_checkpoint)
+            pos_payload = torch.load(pos_path, map_location="cpu")
+            if isinstance(pos_payload, dict):
+                pos_payload = pos_payload.get("weight", pos_payload)
+            assert torch.is_tensor(pos_payload), f"unsupported pos checkpoint payload: {type(pos_payload)}"
+            target_weight = model.model.decoder.embed_positions.weight
+            if tuple(pos_payload.shape) != tuple(target_weight.shape):
+                if (pos_payload.dim() == 2 and pos_payload.shape[1] == target_weight.shape[1]
+                        and pos_payload.shape[0] > target_weight.shape[0]):
+                    pos_offset = int(model.model.decoder.embed_positions.offset)
+                    model = ensure_positions(model, int(pos_payload.shape[0]) - pos_offset)
+                    target_weight = model.model.decoder.embed_positions.weight
+            assert tuple(pos_payload.shape) == tuple(target_weight.shape), (
+                f"pos checkpoint shape {tuple(pos_payload.shape)} != embed_positions {tuple(target_weight.shape)}")
+            with torch.no_grad():
+                target_weight.copy_(pos_payload.to(device=target_weight.device, dtype=target_weight.dtype))
+            print(f"[fed] pos_checkpoint loaded path={pos_path} shape={tuple(target_weight.shape)}")
+        # SMELL 3 run_fed pos_checkpoint END
+    else:
+        # SMELL 3 run_fed distilbert_model ADD — 分类加载器：pos→head→predictor→prune patch（顺序即依赖序）
+        from src.models.modeling_distilbert_smell import load_distilbert_classifier
+        model = load_distilbert_classifier(
+            args.model_dir, num_labels=args.num_labels, dtype=args.dtype,
+            attn=("sdpa_prune" if args.attn == "sdpa_prune" else "sdpa"),
+            seq_len=effective_seq_len, pos_checkpoint=(str(resolve(args.pos_checkpoint))
+                                                        if args.pos_checkpoint else None),
+            head_checkpoint=str(resolve(args.head_checkpoint)),
+            predictor=(str(resolve(args.predictor)) if args.predictor else None),
+            pruned_config=(str(resolve(args.pruned_config)) if args.pruned_config else None),
+            sparse=args.sparse)
+        if args.attn == "sdpa_prune":
+            print(f"[fed] distilbert prune sparse={model.config.sparse} pool_size={model.config.pool_size} "
+                  f"n_layers={model.config.n_layers}")
+        # SMELL 3 run_fed distilbert_config ADD — DistilBertConfig 无 num_hidden_layers/num_attention_heads 命名：
+        # 补别名供 resolve_model_config / vote accumulator / CATV 使用（n_layers/n_heads 为原生名）
+        model.config.num_hidden_layers = int(model.config.n_layers)
+        base_config = model.config
+        if args.predictor:
+            params = torch.load(resolve(args.predictor), map_location="cpu")
+            predictor_loaded = len(params)
+            predictor_zero_filled = sum(1 for name in model.state_dict()
+                                        if ".predictor." in name and name.endswith(".bias")
+                                        and name not in params)
     # SMELL 3 run_fed adapter_init BEGIN — 载入 warmup 训练好的 LoRA 适配器（is_trainable=True，继续参与 FedAvg）
     if args.adapter_init:
         from peft import PeftModel
@@ -514,8 +643,22 @@ def main():
         # SMELL 3 run_fed adapter_init FIXED — from_pretrained 返回新 PeftModel；重解析共享 config，保证 consensus_mask/vote_callback 可挂载
         base_config = resolve_model_config(model)
         print(f"[fed] adapter_init loaded path={adapter_path} trainable_params={count_trainable(model)}")
+    elif args.arch == "distilbert":
+        from peft import TaskType
+        model = build_lora_model(model, r=args.lora_r, lora_alpha=args.lora_alpha,
+                                 targets=LORA_TARGETS_DISTILBERT, task_type=TaskType.SEQ_CLS)
     else:
         model = build_lora_model(model, r=args.lora_r, lora_alpha=args.lora_alpha, targets=LORA_TARGETS)
+    # SMELL 3 run_fed distilbert_freeze ADD — PEFT SEQ_CLS 会把 pre_classifier/classifier 设为可训练（modules_to_save）；
+    # D3 要求 FL 只传 LoRA、分类头冻结在 Step1 权重：显式冻结所有非 LoRA 参数（adapter 里冗余头副本=Step1 值，行为不变）
+    if args.arch == "distilbert":
+        extra_trainable = [name for name, param in model.named_parameters()
+                           if param.requires_grad and "lora_" not in name]
+        for name, param in model.named_parameters():
+            if "lora_" not in name:
+                param.requires_grad_(False)
+        print(f"[fed] distilbert frozen {len(extra_trainable)} non-LoRA trainable tensors "
+              f"(head fixed at Step1 weights): {extra_trainable[:4]}")
     # SMELL 3 run_fed adapter_init END
     model = model.cuda().train()
     global_state = get_trainable_state_dict(model)
@@ -560,7 +703,12 @@ def main():
         "client_names": client_names,
         "partition_counts": partition_counts,
         "trainable_params": trainable_params,
-        "lora_targets": LORA_TARGETS,
+        # SMELL 3 run_fed arch MODIFIED — 记录实际生效的 LoRA 目标（opt: q_proj.. / distilbert: q_lin..）
+        "lora_targets": LORA_TARGETS_DISTILBERT if args.arch == "distilbert" else LORA_TARGETS,
+        # SMELL 3 run_fed arch config ADD — distilbert 分类头路径（FL 冻结）与类别数
+        "arch": args.arch,
+        "resolved_head_checkpoint": str(resolve(args.head_checkpoint)) if args.head_checkpoint else None,
+        "num_labels": args.num_labels,
         # SMELL 3 run_fed rank_rotation config ADD — LoRA 秩数（rank_mode/rank_k 来自 vars(args)）
         "num_lora_ranks": num_ranks,
         # SMELL 3 run_fed subspace_zo ADD — 解析后的子空间选择与实际激活元素数（可复现性）
@@ -591,7 +739,8 @@ def main():
     }
     (out_dir / "config.json").write_text(json.dumps(run_config, indent=2, default=str), encoding="utf-8")
 
-    print(f"[fed] tag={args.tag} clients={len(client_names)} trainable_params={trainable_params} "
+    print(f"[fed] arch={args.arch} tag={args.tag} clients={len(client_names)} "
+          f"trainable_params={trainable_params} "
           f"weight={args.weight} sparse={args.sparse} lr={args.lr} seed={args.seed} "
           f"trainer={args.trainer} truncate={args.truncate} seq_len={effective_seq_len}")
     print(f"[fed] data={data_root} out={out_dir}")
@@ -630,7 +779,7 @@ def main():
         client_votes = {}
         for name in client_names:
             client_dir = data_root / args.tag / "clients" / name
-            input_ids_np = np.load(client_dir / "train_input_ids.npy")
+            input_ids_np = np.load(client_dir / "train_input_ids.npy", mmap_mode="r")
             num_samples = len(input_ids_np)
             if args.max_train_samples > 0:
                 num_samples = min(num_samples, args.max_train_samples)
@@ -642,9 +791,16 @@ def main():
                                   # SMELL 3 run_fed trainer ADD — 本地训练器与 BP 裁剪阈值
                                   trainer=args.trainer, bp_clip=args.bp_clip,
                                   # SMELL 3 run_fed rank_rotation ADD — 本轮激活秩掩码
-                                  active_index=active_index, active_ranks=active_ranks)
-            result = runner.run(iter_batches(input_ids_np, num_samples, model.device,
-                                             truncate=args.truncate))
+                                  active_index=active_index, active_ranks=active_ranks,
+                                  # SMELL 3 run_fed classification ADD — 分类任务 CE（冻结头）batch 形态
+                                  task=("classification" if args.arch == "distilbert" else "causal_lm"))
+            if args.arch == "distilbert":
+                batch_iter = iter_classification_batches(client_dir, num_samples, model.device,
+                                                         truncate=args.truncate)
+            else:
+                batch_iter = iter_batches(input_ids_np, num_samples, model.device,
+                                          truncate=args.truncate)
+            result = runner.run(batch_iter)
             # SMELL 3 run_fed delta_clip BEGIN — 逐 client delta 范数裁剪：重尾 ZO 估计的离群 client（如 δ=2.4e4）
             # 在 FedAvg 里会直接毒化全局模型；按范数缩放保方向、只裁离群（审计 260929-110000）
             client_delta = result["delta"]

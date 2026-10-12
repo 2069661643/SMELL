@@ -75,8 +75,11 @@ class ClientRunner:
                  # SMELL 3 ClientRunner trainer ADD — zoo=前向梯度（默认，字节兼容）；bp=标准反传本地训练
                  trainer="zoo", bp_clip=1.0,
                  # SMELL 3 ClientRunner rank_rotation ADD — 激活秩掩码/秩集合（None = 旧行为，全参数）
-                 active_index=None, active_ranks=None):
+                 active_index=None, active_ranks=None,
+                 # SMELL 3 ClientRunner classification ADD — causal_lm（OPT 旧行为）| classification（DistilBERT CE + 冻结头）
+                 task="causal_lm"):
         assert trainer in ("zoo", "bp"), f"unknown trainer: {trainer}"
+        assert task in ("causal_lm", "classification"), f"unknown task: {task}"
         self.model = model
         self.local_steps = int(local_steps)
         self.lr = float(lr)
@@ -90,9 +93,19 @@ class ClientRunner:
         # SMELL 3 ClientRunner rank_rotation ADD — 秩掩码：ZOO 子空间收缩 / BP 非激活快照-还原
         self.active_index = active_index
         self.active_ranks = list(active_ranks) if active_ranks is not None else None
+        self.task = str(task)
 
-    def _loss_fn(self, input_ids):
-        return lambda: self.model(input_ids, labels=input_ids).loss
+    # SMELL 3 ClientRunner classification BEGIN — 分类 batch=(input_ids, attention_mask, labels)；LM batch=input_ids
+    def _batch_loss(self, batch):
+        if self.task == "classification":
+            input_ids, attention_mask, labels = batch
+            return self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels).loss
+        input_ids = batch
+        return self.model(input_ids, labels=input_ids).loss
+
+    def _loss_fn(self, batch):
+        return lambda: self._batch_loss(batch)
+    # SMELL 3 ClientRunner classification END
 
     def run(self, input_ids_iterable):
         from src.train.lora import get_trainable_state_dict
@@ -130,17 +143,24 @@ class ClientRunner:
             steps = 0
             for _ in range(self.local_steps):
                 try:
-                    input_ids = next(iterator)
+                    batch = next(iterator)
                 except StopIteration:
                     break
-                if isinstance(input_ids, dict):
-                    input_ids = input_ids["input_ids"]
-                input_ids = input_ids.to(device)
+                if isinstance(batch, dict):
+                    batch = batch["input_ids"]
+                # SMELL 3 ClientRunner classification MODIFIED — 分类 batch=(ids, mask, labels) 逐张量搬设备；LM 保持旧路径
+                if isinstance(batch, (tuple, list)):
+                    batch = tuple(item.to(device) if torch.is_tensor(item) else item for item in batch)
+                else:
+                    batch = batch.to(device)
                 # SMELL 3 ClientRunner bp BEGIN — zero_grad → autocast bf16 前向 → backward → clip → step
                 if self.trainer == "bp":
                     optimizer.zero_grad(set_to_none=True)
                     with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                        loss = self.model(input_ids=input_ids, labels=input_ids, use_cache=False).loss
+                        if self.task == "classification":
+                            loss = self._batch_loss(batch)
+                        else:
+                            loss = self.model(input_ids=batch, labels=batch, use_cache=False).loss
                     loss.backward()
                     losses.append(float(loss.detach().float().cpu()))
                     if self.bp_clip > 0:
@@ -160,10 +180,10 @@ class ClientRunner:
                     continue
                 # SMELL 3 ClientRunner bp END
                 with torch.no_grad():
-                    losses.append(float(self.model(input_ids, labels=input_ids).loss.detach().cpu()))
+                    losses.append(float(self._batch_loss(batch).detach().cpu()))
                 # SMELL 3 ClientRunner rank_rotation ADD — ZOO 只在 active_index 子空间估计/扰动
                 assert not self.model.training, "ZOO probes require eval mode (dropout must be off)"
-                grad = zo_grad(self.model, self._loss_fn(input_ids), self.zo_eps, self.zo_directions,
+                grad = zo_grad(self.model, self._loss_fn(batch), self.zo_eps, self.zo_directions,
                                index=self.active_index)
                 grad_flat = torch.cat([grad[name].reshape(-1).float() for name in names])
                 apply_flat_delta(self.model, (-self.lr * grad_flat).to(device))
