@@ -83,6 +83,9 @@ def parse_args():
                         help="rotate over the first N layers only (0 = all; requires --zo-layer-rotate)")
     # SMELL 3 run_fed truncate ADD — smoke 用：每条训练序列只取前 N token（0 = 关闭，全长）
     parser.add_argument("--truncate", type=int, default=0, help="smoke only: train on first N tokens; 0 = full seq")
+    # SMELL 3 run_fed doc_order ADD — 每轮 client 取数游标：fixed=老协议（固定前 L 篇）；cycle=逐轮轮转语料（每轮 start+=L）
+    parser.add_argument("--doc-order", choices=("fixed", "cycle"), default="fixed",
+                        help="client doc cursor: fixed (legacy) | cycle (rotate start by round*local_steps)")
     # SMELL 3 run_fed init-path ADD — warmup 产物初始化：位置表 + LoRA 适配器（云端 Step 3/4 复用）
     parser.add_argument("--pos-checkpoint", default=None, help="pos_embed.pt loaded into embed_positions BEFORE LoRA")
     parser.add_argument("--adapter-init", default=None, help="PEFT adapter dir used to initialize LoRA (kept trainable)")
@@ -246,9 +249,12 @@ def load_partition_counts(path):
     return counts
 
 
-def iter_batches(input_ids_np, num_samples, device, truncate=0):
+def iter_batches(input_ids_np, num_samples, device, truncate=0, start=0):
     import torch
-    for index in range(num_samples):
+    # SMELL 3 run_fed doc_order MODIFIED — start>0 时从 start 行起、按总行数卷绕（cycle 协议）
+    total = len(input_ids_np)
+    for k in range(num_samples):
+        index = (start + k) % total if total > 0 else 0
         row = input_ids_np[index]
         # SMELL 3 run_fed truncate ADD — smoke：只保留前 N 个 token（0 = 不截断）
         if truncate > 0:
@@ -258,7 +264,7 @@ def iter_batches(input_ids_np, num_samples, device, truncate=0):
 
 
 # SMELL 3 run_fed classification_batches ADD — DistilBERT 分类：逐样本 (input_ids, attention_mask, labels)
-def iter_classification_batches(client_dir, num_samples, device, truncate=0):
+def iter_classification_batches(client_dir, num_samples, device, truncate=0, start=0):
     import torch
     input_ids_np = np.load(Path(client_dir) / "train_input_ids.npy", mmap_mode="r")
     labels_np = np.load(Path(client_dir) / "train_labels.npy")
@@ -268,7 +274,10 @@ def iter_classification_batches(client_dir, num_samples, device, truncate=0):
     else:
         pad_id = 0
         lengths_np = (np.asarray(input_ids_np) != pad_id).sum(axis=1).astype(np.int64)
-    for index in range(num_samples):
+    # SMELL 3 run_fed doc_order ADD — cycle：从 start 行起取 num_samples 条、按分片总行数卷绕
+    total = int(labels_np.shape[0])
+    for k in range(num_samples):
+        index = (start + k) % total if total > 0 else 0
         row = np.asarray(input_ids_np[index], dtype=np.int64)
         if truncate > 0:
             row = row[:truncate]
@@ -709,6 +718,8 @@ def main():
         "arch": args.arch,
         "resolved_head_checkpoint": str(resolve(args.head_checkpoint)) if args.head_checkpoint else None,
         "num_labels": args.num_labels,
+        # SMELL 3 run_fed doc_order config ADD — 客户端取数协议（可复现性）
+        "doc_order": args.doc_order,
         # SMELL 3 run_fed rank_rotation config ADD — LoRA 秩数（rank_mode/rank_k 来自 vars(args)）
         "num_lora_ranks": num_ranks,
         # SMELL 3 run_fed subspace_zo ADD — 解析后的子空间选择与实际激活元素数（可复现性）
@@ -780,9 +791,12 @@ def main():
         for name in client_names:
             client_dir = data_root / args.tag / "clients" / name
             input_ids_np = np.load(client_dir / "train_input_ids.npy", mmap_mode="r")
-            num_samples = len(input_ids_np)
+            total_rows = int(input_ids_np.shape[0])
+            num_samples = total_rows
             if args.max_train_samples > 0:
                 num_samples = min(num_samples, args.max_train_samples)
+            # SMELL 3 run_fed doc_order ADD — cycle：每轮起始行 = (round*local_steps) % 分片总行数（fixed 恒为 0）
+            round_start = (round_idx * args.local_steps) % total_rows if args.doc_order == "cycle" else 0
 
             load_trainable_state_dict(model, global_state)
             runner = ClientRunner(model, local_steps=args.local_steps, lr=args.lr,
@@ -796,10 +810,10 @@ def main():
                                   task=("classification" if args.arch == "distilbert" else "causal_lm"))
             if args.arch == "distilbert":
                 batch_iter = iter_classification_batches(client_dir, num_samples, model.device,
-                                                         truncate=args.truncate)
+                                                         truncate=args.truncate, start=round_start)
             else:
                 batch_iter = iter_batches(input_ids_np, num_samples, model.device,
-                                          truncate=args.truncate)
+                                          truncate=args.truncate, start=round_start)
             result = runner.run(batch_iter)
             # SMELL 3 run_fed delta_clip BEGIN — 逐 client delta 范数裁剪：重尾 ZO 估计的离群 client（如 δ=2.4e4）
             # 在 FedAvg 里会直接毒化全局模型；按范数缩放保方向、只裁离群（审计 260929-110000）
@@ -824,6 +838,8 @@ def main():
                 "delta_clip_applied": delta_clipped,
                 "delta_norm_by_layer": delta_by_layer,
                 "delta_norm_by_module": delta_by_module,
+                # SMELL 3 run_fed doc_order ADD — 本轮该 client 的起始行（cycle 复现/核对用）
+                "round_start": round_start,
             }
             # SMELL 3 run_fed catv votes ADD — 收集本轮客户端投票（可选 per-layer sum 归一化）
             if catv_on:
@@ -885,6 +901,9 @@ def main():
             "zo_directions": args.zo_directions,
             # SMELL 3 run_fed trainer ADD — 每条 round 记录本地训练器（zoo|bp）
             "trainer": args.trainer,
+            # SMELL 3 run_fed doc_order ADD — 本轮取数协议与起始行（fixed 恒 0；cycle 按轮推进）
+            "doc_order": args.doc_order,
+            "round_start": round_start,
             # SMELL 3 run_fed rank_rotation ADD — 本轮秩调度记录
             "rank_mode": args.rank_mode,
             "rank_k": args.rank_k,
