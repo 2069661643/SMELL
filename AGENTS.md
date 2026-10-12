@@ -35,12 +35,12 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 
 | # | 交付物 | 位置 | 状态 |
 |---|---|---|---|
-| 1 | Discovery 16k 分片（α=0.1/0.3） | `dataset_v3/discovery_16k/{a01,a03}`（gitignore） | 代码 ✅；**a01 已在 AutoDL 重建（warmup sha 与清单一致），a03 未建** |
+| 1 | Discovery 16k 分片（α=0.1/0.3） | `dataset_v3/discovery_16k/{a01,a03}`（gitignore） | 代码 ✅；**a01/a03 已在 AutoDL 重建（warmup sha 与清单一致）** |
 | 2 | warmup 池（512×16k，零重叠） | 同上 `warmup_input_ids.npy` | 代码 ✅ |
 | 3 | 位置扩展模块 | `src/models/position_embed.py` | ✅ |
 | 4 | 长上下文适配 B/C | `src/train/longctx_adapt.py` | **云端 A40 16k 完成**：B ppl_full 31.4 / C 18.1，2k 无回归；选 C；权重见 `checkpoints/posemb_step1/MANIFEST.json` |
 | 5 | CATV（r<s） | `src/models/token_selector.py` 等 | smoke ✅ |
-| 6 | predictor 训练器 | `src/train/train_predictor.py` | ✅ **唯一可用权重：`checkpoints/predictor/step4_a01_pos_only_causal/`**（causal target 修复；step2/step3 作废） |
+| 6 | predictor 训练器 | `src/train/train_predictor.py` | ✅ **主用：`checkpoints/predictor/step5_a01a03_clients_causal/`**（causal + client 分布重训；step2/3 作废、step4 历史） |
 | 7 | BP/适配 runner | `src/fed/run_fed.py --trainer bp --pos-checkpoint --adapter-init` | smoke ✅ |
 | 8 | 云端 bootstrap | `scripts/setup_server.sh` | ✅（`amax` 需改 CONDA/env 路径；AutoDL 默认适配） |
 | 9 | 4 卡消融编排 | `scripts/run_ablation_cloud.sh` | ✅ |
@@ -48,7 +48,7 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 云端执行顺序（详见 `docs/ailog/260924-120514-...` / `260924-114152-...`）：
 
 1. **位置适配**（`longctx_adapt.py`，warmup 池）：B `--mode pos_only`、C `--mode pos_lora`；判据 16k G-PPL<50、`ppl_tail` 不劣化 ⇒ 产出 `pos_embed.pt`(+`adapter/`)。
-2. **predictor**（`train_predictor.py --pos-checkpoint ...`；**必须带 causal target 修复**，见 ailog `260928-110233`）⇒ `predictor.pth`+`pruned_config.pth`，**只用 step4 causal 版**。
+2. **predictor**（`train_predictor.py --pos-checkpoint ... --data-glob '.../clients/client_*/train_input_ids.npy'`；causal target + client 分布）⇒ `predictor.pth`+`pruned_config.pth`，**主用 step5；加载器对缺失 bias 零填充**（审计 `260929-000200`）。
 3. **BP 去风险**（`run_fed --trainer bp`，c=2~3）同时校准 ZOO 步长。
 4. **消融**（`run_ablation_cloud.sh`）：α∈{0.1,0.3} × CATV off/on，c=30、ZOO+LoRA、16k，4 卡并发。
 5. 调参 + 出图。
@@ -61,13 +61,16 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 - **稀疏口径**：`thresh` = `config.sparse` = **保留 top-40% 的 query 块**（Jenga 仅**上半层**剪、末层豁免）；`OptSdpaPruneAttention` 为其真语义（token 子集化）实现。predictor 须 `load_predictor_weights` 加载训练权重，随机 predictor 的 PPL 不能作质量依据。
 - ZOO `lr=1e-3` 第 2 轮 NaN；跑前先按 `delta_norm` 校准 lr（流程见 ailog `260928-004251`）。
 
-## 最新进展 / 下一步（截至 exp HEAD `f4e879d`，260928 12:41）
+## 最新进展 / 下一步（截至 260930 10:50）
 
-- **predictor 病根已修（step4）**：Jenga `block_attn_pool` 目标**无 causal mask**，对 OPT（post-norm、未归一化残差）退化为「只选尾部块」⇒ 16k LM loss 5.08；`train_predictor.py` 加 causal mask 后重训 `step4_a01_pos_only_causal`（loss 3.44，first-half 选块 0.52–0.59）。**step2/step3 作废**，详见 ailog `260928-110233`、`docs/weight-manifest.md`。
-- **BP k-scan 已出**：收敛随覆盖单调（k=1 −0.038 / k=4 −0.169 / k=12 −0.280，同轮 0–32）⇒ 无可用中间粒度；用户选定 **k=4 rotate4 sparsity ZOO 为 TD-3**（L2 D22, c30, cos≈0.10），由 TD-2' 门控（cos ≥ 0.05）。
-- **TD-3 已停**（云端 `logs/fed/zoo_k4_sparse` 留 adapter_round000–004）；**长跑暂不启动**（用户要求）。
-- 下一步：① 用 step4 predictor 重跑 **TD-2'**（`diag_cos_grid.py --attn sdpa_prune --dtype fp32`）→ 过门控再起 TD-3；② 若 ZOO 粒度不可用 → 主线转 **BP-based FL**（客户端数曲线 c3→26.1 / c10→22.3 / c30→21.5）；③ 成本缓解走 Jenga fused block-sparse / `flex_attention`，gather 已证不划算。
-- 云端跑批检查入口：`temp/logs/last_*_dir.txt`；**读 `metrics.jsonl`（driver.log 有 Python 块缓冲，会滞后）**。
+- **260929 审计修复（两条致命链路 + 一条隐藏项）**：① `run_fed` 的 ZOO 在 `model.train()` 下做有限差分 → dropout=0.1 吞掉差分（grad norm 差 1.3e-5 倍，历史 lr=1e-3 NaN 由此解释）；② 评测从不加载 predictor（随机 predictor 剪枝），且推理侧 predictor bias 随机（训练侧 `bias=False`）→ 已修复：ZOO 强制 eval、ppl 接 `--predictor/--attn/--dtype`、缺 bias 零填充、其余缺 key 报错。**历史 ZOO 运行与 G-PPL 曲线全部作废**。详见 ailog `260929-000200`。
+- **step5 predictor 已重训**（client 分布 a01+a03，400 步；sha256 见 `docs/weight-manifest.md`）；16k×4 实测：step5 answer_ppl 1056 vs random 1762，dense 585。
+- **TD-3@a03（lr=0.15 + delta-clip 1.0）30 轮完成（260930 09:35）**：**full PPL 33.654→33.285（−1.10%，30 点全单调；r0 vs r29 配对 p≈0）——首个 ZOO 正结果**；answer NLL +6.7%（单调退化，诊断队列：dense 对照/E2–E5/BP 对照）。51 个 client-轮被 clip（1.7/轮），无 NaN/爆炸。配置与复现：ailog `260930-094100`；产物 `logs/fed/zoo_k4_sparse_causal_a03_lr0.15_clip/`；报告 `temp/logs/td3_a03_lr015_clip_report.txt`。
+- **dense 对照（260930）**：同一 adapter 在 dense 口径（`--sparse 1.0`）下 answer PPL **−12.2%（改善）** vs sparse +6.4%；当时推断「answer 退化 = frozen predictor 选块漂移」（**已被下条 Step1–3 弱化**）。
+- **Step1–3 已执行（260930 10:42，见 ailog `260930-104500`）**：① 选块漂移**小**：r0 vs r29 kept 块 overlap **0.966–0.996**、first-half 占比不变，与逐样本 Δanswer_nll 相关 −0.52（n=8）；② r29 predictor **刷新**（数据隔离：client train 分片 + r29 adapter，400 步）显著但**幅度小**：answer PPL 1855.0→**1842.5**（配对 ΔNLL −0.0067，p=0.014），**未闭环**（r0=1743.8）；③ E2/E3（r29、layers 20–23、D=4）**无重尾、无选块翻转**（|ΔL| ~1e-7 底噪、flips=0/24 方向对）⇒ 「冻结 predictor 漂移」解释力弱，候选主因回到**训练目标 token 均值淹没 answer（~3/16384）**。refresh 权重 `checkpoints/predictor/refresh_r29_a01a03/`（sha256 见手册）。
+- **BP k-scan 已出**：收敛随覆盖单调（k=1 −0.038 / k=4 −0.169 / k=12 −0.280，同轮 0–32）；k=4 rotate4 sparsity ZOO 为 TD-3 口径（L2 D22, c30）。
+- 云端：**须停止旧 TD-3、pull 本分支后按同参数重跑**（旧运行是 dropout 噪声 + 随机 predictor）。
+- 检查入口：`temp/logs/last_k4_td2_td3_dir.txt` → `driver.log`；**读 `metrics.jsonl`（driver.log 有块缓冲）**。
 
 ## AutoDL 4090 工作机（本 checkout：`/root/smell/SMELL`）
 
@@ -78,7 +81,7 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 - **2k 稀疏 BP smoke 已过**（`--truncate 2048 --sparse 0.4`，1 client × 2 samples × 1 step）：bf16+FA2 loss 3.6245 / δ 0.886（`temp/smoke_bp_flash/`）；fp32+`sdpa_prune`+step4 predictor（144 张量）loss 3.6442（`temp/smoke_bp_sdpa_prune/`）；均 ~1.5s/轮。
 - GitHub：**HTTPS git 会挂死，SSH 正常**（`git@github.com` 已认证）。三个 submodule 的 URL 已在本机 `.git/config` 改成 SSH；**别跑 `git submodule sync`**（会改回 HTTPS 再挂死）。SSH 慢时可临时用 `https://ghfast.top/https://github.com/<owner>/<repo>.git` 前缀（本机这样拉了 FwdLLM）。
 - 已就位（sha256 与 `docs/weight-manifest.md` 完全一致）：`checkpoints/posemb_step1/a01_pos_only_500step/`、`checkpoints/predictor/step4_a01_pos_only_causal/`。
-- 待办：a03 数据未建（需要时 `build_discovery_16k.py --tag a03 --alpha 0.3` + `build_warmup_16k.py --tag a03`）；长跑前先确认 GPU 空闲。
+- a03 数据已建（TD-3 使用，`check_partition` PASSED）；长跑前先确认 GPU 空闲。
 
 ## 云端 A40 环境（host `amax`；与 WSL 脚本**不一致**，先读再跑）
 
@@ -172,6 +175,11 @@ $PY src/fed/run_fed.py --tag a01 --gpu 1 --trainer zoo --catv off \
 | 文件 | 内容 |
 |---|---|
 | `docs/weight-manifest.md`（非 ailog） | **换机交接清单**：权重/数据路径 + sha256 + TD-2'/TD-3 运行 flags |
+| `docs/ailog/260929-000200-...audit-fixes-step5-predictor.md` | **审计修复（必读）**：ZOO dropout / 评测随机 predictor / bias 零填充 + step5 predictor |
+| `docs/ailog/260929-111500-...td3-outlier-explosion-delta-clip.md` | **离群爆炸 + delta-clip**：client_22 δ=2.4e4 毒化聚合的根因与 `--delta-clip 1.0` 修复 |
+| `docs/ailog/260930-094100-...td3-a03-lr015-clip-first-success.md` | **首个 ZOO 正结果**：lr=0.15 + clip 1.0 的完整配置与 30 轮结果（full PPL −1.1%；answer +6.7% caveat）|
+| `docs/ailog/260930-100000-...handoff-dense-diag-next-steps.md` | **最新交接（下一个 session 先读）**：dense 对照发现 + 1→2→E2/E3 实现要点与数据隔离约束 |
+| `docs/ailog/260930-104500-...step123-selection-drift-refresh-e2e3.md` | **Step1–3 结果**：漂移小（overlap 0.97–0.99）/ refresh 未闭环（−0.67%）/ E2-E3 无翻转 |
 | `docs/ailog/260928-110233-...predictor-rootcause-noncausal-target-causal-fix.md` | **predictor causal 修复（step4 唯一可用）**：Jenga 非 causal target 对 OPT 不适配 |
 | `docs/ailog/260928-004251-...fix-ol2-prune-fallback-wire-fp32-sdpa-launch-k4-td3.md` | sdpa_prune 末层 O(L²) 修复、run_fed `--attn/--dtype`、k-scan 结论与 TD-3 |
 | `docs/ailog/260927-194011-...handoff.md` | ZOO 精度根因 + fp32 SDPA 修复、运行队列（上一轮交接） |

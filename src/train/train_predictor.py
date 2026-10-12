@@ -13,6 +13,7 @@
 #       --truncate 512 --steps 4 --no-prune --eval-every 2 --gpu 0 --save-dir temp/predictor_smoke
 
 import argparse
+import glob
 import json
 import os
 import random
@@ -94,6 +95,10 @@ def parse_args():
     parser.add_argument("--tag", default="a01")
     parser.add_argument("--data", default=None,
                         help="train input_ids npy [N, L]; default dataset_v3/discovery_16k/<tag>/warmup_input_ids.npy")
+    # SMELL 3 train_predictor data_glob ADD — 支持多分片拼接训练（如各 client 的 train_input_ids.npy），
+    # 让 predictor 的分布与 FL 样本（instruction+demos+query+label）一致，而不是只有 warmup（无 query）
+    parser.add_argument("--data-glob", action="append", default=None,
+                        help="glob of input_ids npy shards to concatenate; repeatable; overrides --data")
     parser.add_argument("--pos-init", choices=("interpolate", "duplicate", "jenga_dup_scaled"),
                         default="interpolate")
     parser.add_argument("--pos-checkpoint", default=None,
@@ -153,6 +158,33 @@ def load_ids(path):
     if array.ndim != 2:
         raise SystemExit(f"expected 2D [N, L] input_ids at {path}, got shape {array.shape}")
     return array
+
+
+# SMELL 3 train_predictor load_ids_multi ADD — 按 glob 收集多个 [N, L] 分片并拼接为单个训练矩阵
+def load_ids_multi(patterns):
+    paths = []
+    for pattern in patterns:
+        full = pattern if os.path.isabs(pattern) else str(REPO / pattern)
+        hits = sorted(glob.glob(full))
+        if not hits:
+            raise SystemExit(f"no shards match --data-glob {pattern!r}")
+        paths.extend(hits)
+    arrays = [np.load(path, mmap_mode="r") for path in paths]
+    for path, array in zip(paths, arrays):
+        if array.ndim != 2:
+            raise SystemExit(f"expected 2D [N, L] input_ids at {path}, got shape {array.shape}")
+        if int(array.shape[1]) != int(arrays[0].shape[1]):
+            raise SystemExit(
+                f"shard seq_len mismatch at {path}: {int(array.shape[1])} != {int(arrays[0].shape[1])}")
+    total = sum(int(array.shape[0]) for array in arrays)
+    out = np.empty((total, int(arrays[0].shape[1])), dtype=arrays[0].dtype)
+    offset = 0
+    for array in arrays:
+        rows = int(array.shape[0])
+        out[offset:offset + rows] = np.asarray(array)
+        offset += rows
+    print(f"[predictor] data-glob shards={len(paths)} rows={total} seq_len={int(out.shape[1])}")
+    return out
 
 
 def row_to_tensor(array, index, truncate, device):
@@ -327,7 +359,7 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = save_dir / "metrics.jsonl"
 
-    train_array = load_ids(data_path)
+    train_array = load_ids_multi(args.data_glob) if args.data_glob else load_ids(data_path)
     train_full_len = int(train_array.shape[1])
     if args.eval_data:
         eval_array = load_ids(resolve(args.eval_data))
@@ -366,7 +398,8 @@ def main():
     print(f"[predictor] prune={do_prune} interval={args.prune_interval} until={args.prune_until} "
           f"lr={args.lr} weight_decay={args.weight_decay} steps={args.steps} "
           f"batch_size={args.batch_size} max_grad_norm={args.max_grad_norm}")
-    print(f"[predictor] data={data_path} (n={train_array.shape[0]} len={train_full_len} used={seq_len})")
+    print(f"[predictor] data={('glob:' + ','.join(args.data_glob)) if args.data_glob else data_path} "
+          f"(n={train_array.shape[0]} len={train_full_len} used={seq_len})")
     print(f"[predictor] eval={'first ' + str(eval_count) + ' rows of ' if not args.eval_data else ''}"
           f"{'eval_data' if args.eval_data else 'train data'} every={args.eval_every} "
           f"save_dir={save_dir}")
@@ -374,7 +407,7 @@ def main():
     config_payload = {
         **vars(args),
         "resolved_model_dir": args.model_dir,
-        "resolved_data": str(data_path),
+        "resolved_data": ("glob:" + ",".join(args.data_glob)) if args.data_glob else str(data_path),
         "resolved_eval_data": str(resolve(args.eval_data)) if args.eval_data else str(data_path),
         "resolved_save_dir": str(save_dir),
         "train_full_seq_len": train_full_len,

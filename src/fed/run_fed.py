@@ -53,6 +53,9 @@ def parse_args():
     # SMELL 3 run_fed trainer ADD — zoo=前向梯度本地更新（默认）；bp=标准反传本地训练（Step 3 机制去风险）
     parser.add_argument("--trainer", choices=("zoo", "bp"), default="zoo")
     parser.add_argument("--bp-clip", type=float, default=1.0, help="BP grad clip norm; <=0 disables clipping")
+    # SMELL 3 run_fed delta_clip ADD — 逐 client delta 全局 L2 范数裁剪（防重尾离群 client 毒化 FedAvg；0=off）
+    parser.add_argument("--delta-clip", type=float, default=1.0,
+                        help="per-client delta L2 norm clip before aggregation; <=0 disables")
     # SMELL 3 run_fed rank_rotation ADD — LoRA 秩调度：all=旧行为；rotate=每轮激活 rank_k 个秩轮换；lock=固定前 rank_k 秩
     parser.add_argument("--rank-mode", choices=("all", "rotate", "lock"), default="all")
     parser.add_argument("--rank-k", type=int, default=1, help="每轮激活秩数（>0；rotate/lock 生效）")
@@ -85,6 +88,9 @@ def parse_args():
     # SMELL 3 run_fed act_pack ADD — BP 默认旁路 Jenga 半丢弃 hooks（避免梯度静默污染）；ZOO 不受影响
     parser.add_argument("--act-pack", choices=("off", "on"), default="off")
     parser.add_argument("--eval-every", type=int, default=0, help="0 = off; else run ppl.py every N rounds")
+    # SMELL 3 run_fed save_every ADD — 每 N 轮存 adapter（秒级），与 eval（分钟级）解耦
+    parser.add_argument("--save-every", type=int, default=1,
+                        help="save LoRA adapter every N rounds (0 = off; eval rounds always save)")
     parser.add_argument("--out-root", default="logs/fed")
     return parser.parse_args()
 
@@ -157,10 +163,27 @@ def load_predictor_weights(model, path):
         raise RuntimeError(
             f"predictor shape mismatch for {len(mismatched)} tensors, e.g. {mismatched[:3]}; "
             f"--pruned-config must match --predictor")
+    # SMELL 3 run_fed predictor_missing FIXED — 缺失的 predictor 权重不得静默留随机值：
+    # 训练侧 PrunableAttnPredictor 的 Linear 是 bias=False（checkpoint 只有 weight），
+    # 推理侧 PrunableAttnPredictorInfer 带 bias → 等价语义（bias=0）零填充；其余缺失硬报错
+    expected = [key for key in model_state if ".predictor." in key]
+    missing = [key for key in expected if key not in state]
+    zero_filled = [key for key in missing if key.endswith(".bias")]
+    hard_missing = [key for key in missing if key not in zero_filled]
+    if hard_missing:
+        raise RuntimeError(
+            f"predictor checkpoint {path} missing {len(hard_missing)}/{len(expected)} model predictor "
+            f"tensors, e.g. {hard_missing[:3]}; check --predictor/--pruned-config pairing")
+    if zero_filled:
+        with torch.no_grad():
+            for key in zero_filled:
+                model_state[key].zero_()
+        print(f"[fed] predictor zero-filled {len(zero_filled)} untrained bias tensors "
+              f"(train-side predictor uses bias=False)")
     if loaded == 0:
         raise RuntimeError(f"predictor loaded 0 tensors from {path}; check key prefixes")
-    print(f"[fed] predictor loaded tensors={loaded} skipped={skipped} path={path}")
-    return loaded, skipped
+    print(f"[fed] predictor loaded tensors={loaded} skipped={skipped} zero_filled={len(zero_filled)} path={path}")
+    return loaded, skipped, len(zero_filled)
 # SMELL 3 run_fed predictor END
 
 
@@ -273,12 +296,15 @@ def sample_pairwise_cos(deltas, max_clients=5):
     return (sum(values) / len(values)) if values else None
 
 
-def run_global_eval(args, model, out_dir, metrics_path, round_idx):
+def run_global_eval(args, model, out_dir, metrics_path, round_idx, adapter_ready=False):
     from src.fed.serial_fedavg import append_metrics
     adapter_dir = out_dir / f"adapter_round{round_idx:03d}"
-    model.save_pretrained(str(adapter_dir))
+    # SMELL 3 run_fed eval_adapter_reuse MODIFIED — 仅复用本轮 save 刚落盘的 adapter；否则必存（覆盖同 out-root 旧文件，防静默评旧权重，audit 260930-122106 R4）
+    if not adapter_ready:
+        model.save_pretrained(str(adapter_dir))
     # SMELL 3 run_fed eval_lora_checkpoint ADD — 记录每次 eval 保存的 LoRA checkpoint 路径
     eval_out = out_dir / f"eval_round{round_idx:03d}.json"
+    per_sample_out = out_dir / f"eval_round{round_idx:03d}_persample.json"
     command = [
         sys.executable, str(REPO / "src" / "eval" / "ppl.py"),
         "--model-dir", args.model_dir,
@@ -287,11 +313,27 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx):
         "--split", "global",
         "--adapter", str(adapter_dir),
         "--sparse", str(args.sparse),
+        # SMELL 3 run_fed eval_attn_dtype FIXED — 评测与训练同 attn/dtype（审计 260928：旧评测算 bf16+FA2 且随机 predictor）
+        "--attn", str(args.attn),
+        "--dtype", str(args.dtype),
         "--out", str(eval_out),
+        # SMELL 3 run_fed eval_persample ADD — 逐样本 NLL 落盘，供 scripts/paired_eval.py 配对检验
+        "--per-sample-out", str(per_sample_out),
     ]
+    # SMELL 3 run_fed eval_predictor FIXED — 必须加载训练后 predictor，否则 Jenga 对非末层用随机 predictor 剪枝
+    if getattr(args, "predictor", None):
+        command += ["--predictor", str(resolve(args.predictor)),
+                    "--pruned-config", str(resolve(args.pruned_config))]
     # SMELL 3 run_fed eval pos_checkpoint ADD — 评测须加载同一 pos_embed，否则位置表错位导致 G-PPL 失真
     if getattr(args, "pos_checkpoint", None):
         command += ["--pos-checkpoint", str(args.pos_checkpoint)]
+    # SMELL 3 run_fed eval_truncate ADD — smoke 时 eval 与训练用同一截断，避免全 16k 评测
+    if getattr(args, "truncate", 0) > 0:
+        command += ["--truncate", str(args.truncate)]
+    # SMELL 3 run_fed eval_catv_mask ADD — CATV 评测用本轮最新共识锚掩码（最后一轮口径，见 ailog 261003）
+    mask_path = out_dir / f"consensus_mask_round{round_idx}.pt"
+    if getattr(args, "catv", "off") == "on" and mask_path.exists():
+        command += ["--catv-mask", str(mask_path)]
     proc = subprocess.run(command, cwd=str(REPO), capture_output=True, text=True)
     if proc.returncode != 0 or not eval_out.exists():
         append_metrics(metrics_path, {
@@ -301,6 +343,7 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx):
             "trainer": args.trainer,
             # SMELL 3 run_fed eval_lora_checkpoint ADD — 记录每次 eval 保存的 LoRA checkpoint 路径
             "lora_checkpoint": str(adapter_dir),
+            "per_sample": str(per_sample_out),
         })
         print(f"[fed] eval round {round_idx} FAILED rc={proc.returncode}: {proc.stderr.strip()[-200:]}")
         print(f"[fed] eval round {round_idx} lora_checkpoint={adapter_dir}")
@@ -309,7 +352,8 @@ def run_global_eval(args, model, out_dir, metrics_path, round_idx):
     append_metrics(metrics_path, {"event": "eval", "round": round_idx, "status": "ok",
                                   "trainer": args.trainer,
                                   # SMELL 3 run_fed eval_lora_checkpoint ADD — 记录每次 eval 保存的 LoRA checkpoint 路径
-                                  "lora_checkpoint": str(adapter_dir), **payload})
+                                  "lora_checkpoint": str(adapter_dir),
+                                  "per_sample": str(per_sample_out), **payload})
     print(f"[fed] eval round {round_idx} full_ppl_token={payload['full_ppl_token']} "
           f"answer_ppl_token={payload['answer_ppl_token']}")
     print(f"[fed] eval round {round_idx} lora_checkpoint={adapter_dir}")
@@ -329,6 +373,10 @@ def main():
             raise SystemExit(f"CATV requires 0 < r < s, got r={catv_r} s={args.sparse}")
         if args.sparse + catv_r > 1.0 + 1e-9:
             raise SystemExit(f"CATV requires s + r <= 1, got s={args.sparse} r={catv_r}")
+    # SMELL 3 run_fed catv_sdpa_guard MODIFIED — CATV 已接线 flash 与 sdpa_prune（261003 移植，审计 4.2）；其余后端仍 fail-fast
+    if catv_on and args.attn not in ("flash", "sdpa_prune"):
+        raise SystemExit(
+            f"--catv on requires --attn flash|sdpa_prune (vote callback is not wired for {args.attn})")
 
     # SMELL 3 run_fed predictor ADD — predictor/pruned-config 必须成对提供
     if bool(args.predictor) != bool(args.pruned_config):
@@ -336,6 +384,8 @@ def main():
     # SMELL 3 run_fed rank_rotation ADD — rank_k 必须为正
     if args.rank_k <= 0:
         raise SystemExit(f"--rank-k must be > 0, got {args.rank_k}")
+    if args.delta_clip < 0:
+        raise SystemExit(f"--delta-clip must be >= 0, got {args.delta_clip}")
     # SMELL 3 run_fed subspace_zo BEGIN — 子空间 ZO 参数校验、与秩轮换互斥、解析选择串
     if args.zo_subspace != "all" and args.rank_mode != "all":
         raise SystemExit(
@@ -420,6 +470,7 @@ def main():
         config.attn_implementation = args.attn
     # SMELL 3 run_fed predictor BEGIN — 载入 pruned_config 并在建模前挂到 config（OPTAttention 据此重建剪枝形状）
     predictor_loaded = 0
+    predictor_zero_filled = 0  # SMELL 3 run_fed predictor_zero_filled FIXED — 未传 --predictor 时 config 落盘不再 UnboundLocalError（audit 260930-122106 P0）
     if args.predictor:
         pruned_path = resolve(args.pruned_config)
         pruned_payload = torch.load(pruned_path, map_location="cpu")
@@ -430,7 +481,7 @@ def main():
     # SMELL 3 run_fed dtype_attn MODIFIED — 由 args.dtype 决定 bf16/fp32（bf16 旧行为不变）
     model = OPTForCausalLM.from_pretrained(args.model_dir, torch_dtype=model_dtype, config=config)
     if args.predictor:
-        predictor_loaded, _ = load_predictor_weights(model, resolve(args.predictor))
+        predictor_loaded, _, predictor_zero_filled = load_predictor_weights(model, resolve(args.predictor))
     # SMELL 3 run_fed predictor END
     # SMELL 3 run_fed base_config ADD — 保存 LoRA 包装前的 OPTConfig 引用（vote_callback/consensus_mask 挂载点）
     base_config = model.config
@@ -534,6 +585,7 @@ def main():
         "resolved_predictor": str(resolve(args.predictor)) if args.predictor else None,
         "resolved_pruned_config": str(resolve(args.pruned_config)) if args.pruned_config else None,
         "predictor_loaded_tensors": predictor_loaded,
+        "predictor_zero_filled_tensors": predictor_zero_filled,
         "torch_version": torch.__version__,
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
     }
@@ -593,7 +645,17 @@ def main():
                                   active_index=active_index, active_ranks=active_ranks)
             result = runner.run(iter_batches(input_ids_np, num_samples, model.device,
                                              truncate=args.truncate))
-            deltas.append(result["delta"])
+            # SMELL 3 run_fed delta_clip BEGIN — 逐 client delta 范数裁剪：重尾 ZO 估计的离群 client（如 δ=2.4e4）
+            # 在 FedAvg 里会直接毒化全局模型；按范数缩放保方向、只裁离群（审计 260929-110000）
+            client_delta = result["delta"]
+            raw_norm = delta_norm(client_delta)
+            delta_clipped = False
+            if args.delta_clip > 0 and raw_norm > args.delta_clip:
+                scale = args.delta_clip / raw_norm
+                client_delta = {key: value * scale for key, value in client_delta.items()}
+                delta_clipped = True
+            # SMELL 3 run_fed delta_clip END
+            deltas.append(client_delta)
             counts.append(num_samples)
             losses.append(result["train_loss"])
             # SMELL 3 run_fed per_module_delta ADD — 逐层/逐投影拆解 client δ 范数
@@ -602,7 +664,8 @@ def main():
                 "samples": num_samples,
                 "steps": result["steps"],
                 "train_loss": result["train_loss"],
-                "delta_norm": delta_norm(result["delta"]),
+                "delta_norm": raw_norm,
+                "delta_clip_applied": delta_clipped,
                 "delta_norm_by_layer": delta_by_layer,
                 "delta_norm_by_module": delta_by_module,
             }
@@ -627,6 +690,10 @@ def main():
             if valid else None
         )
         norms = [stats["delta_norm"] for stats in client_stats.values()]
+        # SMELL 3 run_fed delta_clip ADD — 本轮被裁剪的 client 数（诊断重尾离群）
+        clipped_clients = sum(1 for stats in client_stats.values() if stats["delta_clip_applied"])
+        # SMELL 3 run_fed delta_clip ADD — 裁剪后范数均值（聚合实际口径；raw 均值仍会被离群值拉高）
+        clipped_norms = [delta_norm(delta) for delta in deltas]
         # SMELL 3 run_fed per_module_delta ADD — 各层 δ 范数的跨 client 均值（缺失层按 0 计）
         layer_keys = sorted(
             {key for stats in client_stats.values() for key in stats["delta_norm_by_layer"]},
@@ -647,6 +714,8 @@ def main():
             "delta_norm_mean": sum(norms) / len(norms),
             "delta_norm_min": min(norms),
             "delta_norm_max": max(norms),
+            "clipped_clients": clipped_clients,
+            "delta_norm_clipped_mean": sum(clipped_norms) / len(clipped_norms),
             # SMELL 3 run_fed per_module_delta ADD — 逐层 δ 范数跨 client 均值
             "delta_norm_by_layer_mean": delta_norm_by_layer_mean,
             # SMELL 3 run_fed zo_layer_rotate ADD — 本轮实际激活层（rotate=轮转集合；固定 layers=zo_layers）
@@ -703,15 +772,26 @@ def main():
         # SMELL 3 run_fed catv mask END
         append_metrics(metrics_path, record)
         print(f"[fed] round {round_idx}/{args.rounds - 1} loss={train_loss_mean} "
-              f"delta_norm={record['delta_norm_mean']:.4e} "
+              f"delta_norm={record['delta_norm_mean']:.4e} clipped={clipped_clients} "
               f"cos={record['cos_mean_sampled']} time={record['round_seconds']:.1f}s "
               # SMELL 3 run_fed rank_rotation ADD — 打印本轮激活秩/通信量
               f"active_ranks={active_ranks} comm_bytes={record['communication_bytes']} "
               # SMELL 3 run_fed zo_layer_rotate ADD — 打印本轮激活层（rotate 核对用）
               f"active_layers={round_active_layers}")
 
+        # SMELL 3 run_fed save_every ADD — 每 N 轮存 adapter（秒级），与 eval（分钟级）解耦
+        save_due = args.save_every > 0 and (round_idx + 1) % args.save_every == 0
+        if save_due:
+            saved_dir = out_dir / f"adapter_round{round_idx:03d}"
+            model.save_pretrained(str(saved_dir))
+            append_metrics(metrics_path, {
+                "event": "save", "round": round_idx, "trainer": args.trainer,
+                "lora_checkpoint": str(saved_dir),
+            })
+            print(f"[fed] save round {round_idx} lora_checkpoint={saved_dir}")
+
         if args.eval_every > 0 and (round_idx + 1) % args.eval_every == 0:
-            run_global_eval(args, model, out_dir, metrics_path, round_idx)
+            run_global_eval(args, model, out_dir, metrics_path, round_idx, adapter_ready=save_due)
 
     # SMELL 3 run_fed peak_mem ADD — 报告 CUDA 峰值显存（8GB 卡 BP smoke 的 OOM 判据）
     if torch.cuda.is_available():

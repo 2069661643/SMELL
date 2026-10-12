@@ -812,6 +812,14 @@ class OptSdpaPruneAttention(OptSdpaAttention):
         n_blocks = tgt_len // pool
         with torch.no_grad():
             scores, scored_by = self._prune_block_scores(hidden_states, bsz, n_blocks, pool)
+            # SMELL 3 sdpa_prune vote_callback ADD — 与 OptFlashAttention2 同：上报掩码前原始块分（无梯度）
+            vote_callback = getattr(self.config, "vote_callback", None)
+            if vote_callback is not None:
+                vote_callback(self.layer_idx, scores.detach())
+            # SMELL 3 sdpa_prune consensus_mask ADD — CATV 服务器共识锚掩码加在 topk 之前（+inf 保留 / -inf 排除）
+            consensus_mask = getattr(self.config, "consensus_mask", None)
+            if consensus_mask is not None and self.layer_idx in consensus_mask:
+                scores = scores + consensus_mask[self.layer_idx].to(device=scores.device, dtype=scores.dtype)
             # SMELL 3 modeling_opt_smell sdpa_prune ADD — 层规则与 Jenga 一致：下半层全留、上半层按 sparse 剪
             if self.layer_idx < num_layers // 2 - 1:
                 q_len_blocks = n_blocks

@@ -41,7 +41,7 @@ def build_model(args, torch):
     model = OPTForCausalLM.from_pretrained(args.model_dir, torch_dtype=torch_dtype, config=config)
     if args.predictor:
         from src.fed.run_fed import load_predictor_weights
-        predictor_loaded, _ = load_predictor_weights(model, args.predictor)
+        predictor_loaded, _, predictor_zero_filled = load_predictor_weights(model, args.predictor)
         print(f"[grid] predictor loaded tensors={predictor_loaded} path={args.predictor}", flush=True)
     # SMELL 3 diag_cos_grid predictor END
     model = ensure_positions(model, args.seq)
@@ -75,8 +75,9 @@ def main():
     ap.add_argument("--model-dir", default=str(REPO / "third_party/Jenga/checkpoints/opt-350m"))
     ap.add_argument("--pos-checkpoint", default=str(REPO / "checkpoints/posemb_step1/a01_pos_only_500step/pos_embed.pt"))
     # SMELL 3 diag_cos_grid predictor ADD — 训练后 predictor + 剪枝配置（sdpa_prune 正确稀疏语义所需）
-    ap.add_argument("--predictor", default=str(REPO / "checkpoints/predictor/step4_a01_pos_only_causal/predictor.pth"))
-    ap.add_argument("--pruned-config", default=str(REPO / "checkpoints/predictor/step4_a01_pos_only_causal/pruned_config.pth"))
+    # SMELL 3 diag_cos_grid step5_default MODIFIED — 默认改用 client 分布重训的 step5（step4 为 warmup-only 且历史加载缺 bias）
+    ap.add_argument("--predictor", default=str(REPO / "checkpoints/predictor/step5_a01a03_clients_causal/predictor.pth"))
+    ap.add_argument("--pruned-config", default=str(REPO / "checkpoints/predictor/step5_a01a03_clients_causal/pruned_config.pth"))
     ap.add_argument("--data-root", default=str(REPO / "dataset_v3/discovery_16k/a01/clients"))
     ap.add_argument("--block-layer", type=int, default=0)
     # SMELL 3 diag_cos_grid block_layers ADD — k=4 等多层块：'20-23' -> 名为 'k4' 的子空间（d_eff=4*8192）

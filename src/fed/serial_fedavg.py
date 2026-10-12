@@ -98,6 +98,11 @@ class ClientRunner:
         from src.train.lora import get_trainable_state_dict
         from src.train.zoo import _restore_flat, apply_flat_delta, flatten_trainable, zo_grad
 
+        # SMELL 3 ClientRunner zoo_eval FIXED — ZOO 有限差分必须在 eval 模式：train 模式下 OPT dropout=0.1
+        # 会让 L+/L- 两次探测拿到不同 mask，差分信号被 dropout 噪声吞掉（fp32 也救不了；audit 260928）
+        if self.trainer == "zoo":
+            self.model.eval()
+
         # SMELL 3 ClientRunner votes BEGIN — CATV: 本地训练期间安装逐层投票累积回调
         vote_config = None
         vote_accumulator = None
@@ -157,6 +162,7 @@ class ClientRunner:
                 with torch.no_grad():
                     losses.append(float(self.model(input_ids, labels=input_ids).loss.detach().cpu()))
                 # SMELL 3 ClientRunner rank_rotation ADD — ZOO 只在 active_index 子空间估计/扰动
+                assert not self.model.training, "ZOO probes require eval mode (dropout must be off)"
                 grad = zo_grad(self.model, self._loss_fn(input_ids), self.zo_eps, self.zo_directions,
                                index=self.active_index)
                 grad_flat = torch.cat([grad[name].reshape(-1).float() for name in names])
