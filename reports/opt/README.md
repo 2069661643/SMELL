@@ -68,6 +68,10 @@ $PY reports/opt/make_report.py --only tables
 $PY reports/opt/make_report.py --no-check # 仅调试用
 ```
 
+字体：fig5/fig6 指定 Times New Roman，本机经
+`apt-get install -y ttf-mscorefonts-installer` 安装（华为云镜像）；换机缺失时脚本按
+`Times New Roman → Nimbus Roman → Liberation Serif → STIXGeneral → DejaVu Serif` 自动回退。
+
 ## 对账结果
 
 - 断言：32/32 PASS
