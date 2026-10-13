@@ -968,6 +968,81 @@ def micro_rows():
     return out, pilot_rows
 
 
+def _times_plt():
+    plt = _plt()
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Nimbus Roman", "Liberation Serif",
+                       "STIXGeneral", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+    })
+    return plt
+
+
+def fig5_catv_onoff(arms, figdir):
+    paths = []
+    specs = [
+        ("fig5_catv_alpha01", r"$\alpha$=0.1",
+         arms["a01_d32_44"], arms["a01_catv_44"], (0, 46)),
+        ("fig6_catv_alpha03", r"$\alpha$=0.3",
+         arms["d32_74"], arms["d32_catv_74"], (0, 76)),
+    ]
+    for stem, alpha, off, on, xlim in specs:
+        plt = _times_plt()
+        fig, ax = plt.subplots(figsize=(3.5, 2.7))
+        plot_series(ax, off, 0, "CATV off", PALETTE["gray"], "-", "o")
+        plot_series(ax, on, 0, "CATV on", PALETTE["catv"], "--", "s")
+        ax.set_xlabel("Round")
+        ax.set_ylabel("Full G-PPL")
+        ax.grid(alpha=0.25, lw=0.5)
+        ax.set_xlim(*xlim)
+        ax.legend(loc="upper right", frameon=False)
+        note = (f"{alpha} | 16k full G-PPL | ZOO+LoRA, 30 clients\n"
+                "CATV off vs on (same-protocol evaluation)")
+        ax.text(0.02, 0.03, note, transform=ax.transAxes, fontsize=7, va="bottom", ha="left",
+                bbox={"boxstyle": "square,pad=0.4", "facecolor": "white",
+                      "edgecolor": "black", "linewidth": 0.7})
+        fig.tight_layout()
+        paths += save_fig(fig, figdir, stem)
+        plt.close(fig)
+    return paths
+
+
+def table6_endpoints(arms, tabledir, datadir):
+    specs = [
+        ("0.1", "CATV off", arms["a01_d32_44"]),
+        ("0.1", "CATV on (same)", arms["a01_catv_44"]),
+        ("0.1", "CATV on (deploy)", arms["a01_catv_depl"]),
+        ("0.3", "CATV off", arms["d32_74"]),
+        ("0.3", "CATV on (same)", arms["d32_catv_74"]),
+        ("0.3", "CATV on (deploy)", arms["a03_catv_depl"]),
+    ]
+    header = ["\u03b1", "CATV / eval", "r44 PPL", "r44 drop %", "r74 PPL", "r74 drop %"]
+    rows = []
+    for alpha, label, arm in specs:
+        full0 = arm["points"][0][0]
+        cells = []
+        for rnd in (44, 74):
+            if rnd in arm["points"]:
+                ppl = arm["points"][rnd][0]
+                cells += [f"{ppl:.4f}", f"{(ppl / full0 - 1.0) * 100.0:+.2f}"]
+            else:
+                cells += ["-", "-"]
+        rows.append([alpha, label] + cells)
+    note = ("Full G-PPL at r44/r74; drop % is relative to each arm's own r0 anchor "
+            "(same-protocol: 33.5296 for a03 / 33.5253 for a01; deployment: masked r0 "
+            "33.9393 / 33.9211). a01 runs stopped at r44, so r74 is not available.\n")
+    md = "# Table 6 - CATV endpoints at r44 / r74 (full G-PPL)\n\n" + note + "\n" + md_table(header, rows) + "\n"
+    (tabledir / "table6_catv_r44_r74.md").write_text(md, encoding="utf-8")
+    tex_rows = [[r[0], r[1], r[2], r[3].replace("%", "\\%"), r[4], r[5].replace("%", "\\%")] for r in rows]
+    tex = tex_table("CATV endpoint comparison at r44/r74 (full G-PPL; drops vs own r0 anchor).",
+                    "tab:opt-endpoints", ["$\\alpha$", "CATV / eval", "r44 PPL", "r44 drop \\%",
+                                          "r74 PPL", "r74 drop \\%"], tex_rows)
+    (tabledir / "table6_catv_r44_r74.tex").write_text(tex, encoding="utf-8")
+    write_csv(datadir / "table6_catv_r44_r74.csv", header, rows)
+    return header, rows
+
+
 def table5_micro(tabledir, datadir):
     scan_rows, pilot_rows = micro_rows()
     header1 = ["k (layers/round)", "D", "lr", "loss r0", "loss r2", "dLoss (r2-r0)", "delta r0", "unstable"]
@@ -1009,11 +1084,14 @@ README_TEMPLATE = """# OPT-350M results package
 - `figures/fig2_catv_alpha.{pdf,png}` — CATV × alpha：a03/a01 的 off / on(同口径) / on(部署) 双指标曲线。
 - `figures/fig3_efficiency.{pdf,png}` — 左：full G-PPL vs 实测墙钟小时（完整链）；右：PPL/h 条形（统一取 0–29 轮口径）。
 - `figures/fig4_pos_adaptation.{pdf,png}` — 位置适配 B/C 的 16k/2k G-PPL。
+- `figures/fig5_catv_alpha01.{pdf,png}` — α=0.1 的 CATV on/off（同口径）full G-PPL 曲线；Times New Roman、无标题、注释框白底黑框。
+- `figures/fig6_catv_alpha03.{pdf,png}` — α=0.3 同款。
 - `tables/table1_main_results.{md,tex}` — 主结果汇总（同口径）。
 - `tables/table2_catv_alpha.{md,tex}` — CATV × alpha × 口径，含逐样本配对 ratio/p。
 - `tables/table3_sparse_quality.{md,tex}` — predictor/随机/dense 对照（n=4）+ dense vs sparse（n=500）。
 - `tables/table4_pos_adaptation.{md,tex}` — 位置适配判据表。
 - `tables/table5_micro_scans.{md,tex}` — 覆盖度微扫（k 扫描 + L×D 先导）。
+- `tables/table6_catv_r44_r74.{md,tex}` — CATV 三口径（off / on 同口径 / on 部署）在 r44/r74 的实际值与相对 r0 下降率。
 - `data/*.csv` — 上述图表底层 tidy 数据（`arm_points.csv` 为全部曲线点）。
 
 ## 口径与数据来源
@@ -1025,6 +1103,8 @@ README_TEMPLATE = """# OPT-350M results package
 - 墙钟小时：每个 run block `config.json` mtime → 最后一个 `adapter_round*` mtime；链式
   实验为各 block 之和（不含 block 间探测间隙），与 ailog 中的约数略有出入属定义差异。
 - PPL/h = (full PPL 起点 − 终点) / 墙钟小时；F3 右图统一 0–29 轮窗口。
+- fig5/fig6 按用户指定样式生成：Times New Roman（serif）、无标题、注释白底黑框；
+  表中 α 一律用希腊字母（Markdown 用 `α`，TeX 源用 `$\alpha$`），不写 "a0.1" 形式。
 - 主运行目录：`logs/fed/zoo_k4_sparse_causal_a03_lr0.15_clip`、`zoo_k24_d16_lr0.30_r30`、
   `zoo_k24_d16_r60_cont_lr0.10`、`zoo_k24_d32[_catv]_lr0.30_r30`、
   `a03_zoo_k24_d32[_catv]_lr0.10_cont15{,b,c}`、`a01_zoo_k24_d32[_catv]_lr0.30_r30`、
@@ -1133,6 +1213,8 @@ def main():
             print(f"  {path.relative_to(REPO)}")
         for path in fig4_pos_adaptation(figdir):
             print(f"  {path.relative_to(REPO)}")
+        for path in fig5_catv_onoff(arms, figdir):
+            print(f"  {path.relative_to(REPO)}")
 
     if args.only in ("all", "tables"):
         print("== tables ==")
@@ -1141,6 +1223,7 @@ def main():
         table3_quality(tabledir, datadir)
         table4_pos_adapt(tabledir, datadir)
         table5_micro(tabledir, datadir)
+        table6_endpoints(arms, tabledir, datadir)
         dump_series(arms, datadir)
         for path in sorted(tabledir.iterdir()):
             print(f"  {path.relative_to(REPO)}")
