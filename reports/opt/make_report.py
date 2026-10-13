@@ -990,8 +990,8 @@ def fig5_catv_onoff(arms, figdir):
     for stem, alpha, off, on, on_depl, xlim in specs:
         plt = _times_plt()
         fig, ax = plt.subplots(figsize=(3.5, 2.7))
-        plot_series(ax, off, 0, "CATV off", PALETTE["gray"], "-", "o")
-        plot_series(ax, on, 0, "CATV on", PALETTE["catv"], "--", "s")
+        plot_series(ax, off, 0, "CATV off (baseline)", PALETTE["gray"], "-", "o")
+        plot_series(ax, on, 0, "CATV on (eval off)", PALETTE["catv"], "--", "s")
         plot_series(ax, on_depl, 0, "CATV on (deployment)", PALETTE["violet"], ":", "^")
         ax.set_xlabel("Round")
         ax.set_ylabel("Full G-PPL")
@@ -1009,11 +1009,11 @@ def fig5_catv_onoff(arms, figdir):
 
 def table6_endpoints(arms, tabledir, datadir):
     specs = [
-        ("0.1", "CATV off", arms["a01_d32_44"]),
-        ("0.1", "CATV on (same)", arms["a01_catv_44"]),
+        ("0.1", "CATV off (baseline)", arms["a01_d32_44"]),
+        ("0.1", "CATV on (eval off)", arms["a01_catv_44"]),
         ("0.1", "CATV on (deploy)", arms["a01_catv_depl"]),
-        ("0.3", "CATV off", arms["d32_74"]),
-        ("0.3", "CATV on (same)", arms["d32_catv_74"]),
+        ("0.3", "CATV off (baseline)", arms["d32_74"]),
+        ("0.3", "CATV on (eval off)", arms["d32_catv_74"]),
         ("0.3", "CATV on (deploy)", arms["a03_catv_depl"]),
     ]
     header = ["\u03b1", "CATV / eval", "r44 PPL", "r44 drop %", "r74 PPL", "r74 drop %"]
