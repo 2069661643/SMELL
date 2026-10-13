@@ -8,7 +8,7 @@
 - `figures/fig2_catv_alpha.{pdf,png}` — CATV × alpha：a03/a01 的 off / on(同口径) / on(部署) 双指标曲线。
 - `figures/fig3_efficiency.{pdf,png}` — 左：full G-PPL vs 实测墙钟小时（完整链）；右：PPL/h 条形（统一取 0–29 轮口径）。
 - `figures/fig4_pos_adaptation.{pdf,png}` — 位置适配 B/C 的 16k/2k G-PPL。
-- `figures/fig5_catv_alpha01.{pdf,png}` — α=0.1 的 CATV 三条曲线（off / on / on deployment），16k full G-PPL；Times New Roman、无标题、图例白底黑框。
+- `figures/fig5_catv_alpha01.{pdf,png}` — α=0.1 的 CATV 三条曲线（off (baseline) / on (eval off) / on (eval on)），16k full G-PPL；Times New Roman、无标题、图例白底黑框。
 - `figures/fig6_catv_alpha03.{pdf,png}` — α=0.3 同款。
 - `tables/table1_main_results.{md,tex}` — 主结果汇总（同口径）。
 - `tables/table2_catv_alpha.{md,tex}` — CATV × alpha × 口径，含逐样本配对 ratio/p。

@@ -15,7 +15,7 @@
 | 16:05 | 生成 | `tables/table6_catv_r44_r74.{md,tex}` + `data/table6_catv_r44_r74.csv` | 6 行×{r44,r74 实际值,下降率}；α 列用 `α`/`$\alpha$` |
 | 16:08 | 更新 | `reports/opt/README.md` | 产物索引 + 样式口径说明 |
 | 16:22 | 修改 | `make_report.py` fig5/fig6 | 用户修正：图=3 条线（on / on deployment / off），白底黑框套**图例**（非说明文字），删除模型说明；图例标题=α |
-| 16:30 | 修改 | `make_report.py` 图例/表标签 | 按用户措辞：`CATV off (baseline)`、`CATV on (eval off)`；表 6 同步为 `(baseline)`/`(eval off)`/`(deploy)` |
+| 16:30 | 修改 | `make_report.py` 图例/表标签 | 按用户措辞：`CATV off (baseline)`、`CATV on (eval off)`、`CATV on (eval on)`；表 6 同步 |
 
 ## Table 6 数值（现算，full G-PPL）
 
