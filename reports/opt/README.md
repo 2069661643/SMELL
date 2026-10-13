@@ -8,7 +8,7 @@
 - `figures/fig2_catv_alpha.{pdf,png}` — CATV × alpha：a03/a01 的 off / on(同口径) / on(部署) 双指标曲线。
 - `figures/fig3_efficiency.{pdf,png}` — 左：full G-PPL vs 实测墙钟小时（完整链）；右：PPL/h 条形（统一取 0–29 轮口径）。
 - `figures/fig4_pos_adaptation.{pdf,png}` — 位置适配 B/C 的 16k/2k G-PPL。
-- `figures/fig5_catv_alpha01.{pdf,png}` — α=0.1 的 CATV on/off（同口径）full G-PPL 曲线；Times New Roman、无标题、注释框白底黑框。
+- `figures/fig5_catv_alpha01.{pdf,png}` — α=0.1 的 CATV 三条曲线（off / on / on deployment），16k full G-PPL；Times New Roman、无标题、图例白底黑框。
 - `figures/fig6_catv_alpha03.{pdf,png}` — α=0.3 同款。
 - `tables/table1_main_results.{md,tex}` — 主结果汇总（同口径）。
 - `tables/table2_catv_alpha.{md,tex}` — CATV × alpha × 口径，含逐样本配对 ratio/p。
@@ -27,8 +27,8 @@
 - 墙钟小时：每个 run block `config.json` mtime → 最后一个 `adapter_round*` mtime；链式
   实验为各 block 之和（不含 block 间探测间隙），与 ailog 中的约数略有出入属定义差异。
 - PPL/h = (full PPL 起点 − 终点) / 墙钟小时；F3 右图统一 0–29 轮窗口。
-- fig5/fig6 按用户指定样式生成：Times New Roman（serif）、无标题、注释白底黑框；
-  表中 α 一律用希腊字母（Markdown 用 `α`，TeX 源用 `$lpha$`），不写 "a0.1" 形式。
+- fig5/fig6 按用户指定样式生成：Times New Roman（serif）、无标题、**图例**白底黑框、
+  α 作为图例标题；表中 α 一律用希腊字母（Markdown 用 `α`，TeX 源用 `$lpha$`）。
 - 主运行目录：`logs/fed/zoo_k4_sparse_causal_a03_lr0.15_clip`、`zoo_k24_d16_lr0.30_r30`、
   `zoo_k24_d16_r60_cont_lr0.10`、`zoo_k24_d32[_catv]_lr0.30_r30`、
   `a03_zoo_k24_d32[_catv]_lr0.10_cont15{,b,c}`、`a01_zoo_k24_d32[_catv]_lr0.30_r30`、
