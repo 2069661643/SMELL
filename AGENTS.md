@@ -24,6 +24,7 @@ src/        新代码全部写这里（third_party 只读，允许 COPY 进 src/
   eval/ppl.py   bench/memory.py   hello_world.py(环境自检)
 scripts/    setup_server.sh(云端 bootstrap)、run_ablation_cloud.sh(4 卡)、hello-world.sh
 third_party/ 只读 submodule：FwdLLM / Jenga(OPT+数据+权重) / VQ(Count Sketch)
+reports/    自动生成的交付包（git 跟踪）：`reports/opt/` = OPT-350M 图/表/报告，入口 `make_report.py`
 docs/       standard.md、weight-manifest.md(换机交接)、ailog/、old_ailog/、reference/(gitignore)
 dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 ```

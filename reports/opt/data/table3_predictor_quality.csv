@@ -1,0 +1,4 @@
+selection,full PPL,answer PPL,n
+step5 predictor (main),33.285,1056.4,4
+random predictor,31.900,1761.7,4
+dense (no prune),26.208,584.7,4
