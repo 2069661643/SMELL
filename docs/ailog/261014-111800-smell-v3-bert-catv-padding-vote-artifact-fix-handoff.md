@@ -10,7 +10,7 @@
 | D2 | **block0 强制保留 = 采用**（**BERT 特供**，OPT 路径不动） | 所有剪枝层（2/3/4）、topk 之后强制 union block0；理由见 §3；**影响所有后续 sparse 臂基线** |
 | D3 | fixed-CATV 对照：**先 a03 一臂**（L8D8 / lr=1.4e-3 / 30 轮 ≈7.4h），再定 a01 | 修复落地后执行 |
 | D4 | a03 双臂的**停机由用户处理**（不是本文档/修复 agent 的施工内容） | 产物保留为"含缺陷臂"存档，禁用于论文 |
-| D5 | **投票归一化规格 = P0+P1**（2026-10-14 讨论定稿）：P0=valid-mean + 覆盖资格 + 合格块百分比预算；P1=两阶段 client 聚合（**经核查：现有架构已是两阶段，无需代码改动，见 §4.1.4**）；**P2（q 侧均值归一）不做** | τ 由数据定（§4.1.2），非拍脑袋 |
+| D5 | **投票归一化规格定稿**：**P0a=逐块有效均值（NaN-aware）**；**覆盖资格（P0b）经数据检验取消**（最坏块有效样本 83/240，均值可用）；打分边界按块百分比 `k=floor(catv_r·Ne)`（无资格过滤 ⇒ Ne=256 ⇒ 维持 51/51）；**P1=两阶段 client 聚合，核查后确认已实现**；**P2（q 侧归一）不做** | 见 §4.1；依据 2026-10-14 的 padding/覆盖实测 |
 
 ## §1 缺陷机理（vote padding 假象，代码级）
 1. `src/models/modeling_distilbert_smell.py::DistilBertSdpaPruneAttention.forward`：
@@ -58,28 +58,24 @@
 2. `_VoteAccumulator`：`__call__` 改 `valid = ~torch.isnan(values)`；`sums += torch.nansum(values, dim=0)`；`counts += valid.sum(dim=0)`（counts 由标量改**逐块向量**）；`average()` 改 `sums / counts.clamp(min=1)`（零覆盖块→0 + WARN）。
 3. **OPT 路径零改动**（无 NaN → `nansum==sum`、counts 全等 → 逐位等价），selftest 锁住等价性。
 
-#### 4.1.2 P0b：覆盖资格（阈值由数据定；**client 级 τ_c 不可用，改用前向级 τ_f**）
-- **实测结论（2026-10-14，a01）**：**client 级覆盖饱和**——每 client 每轮只采 8 篇，只要其中 1 篇长文就覆盖全部块；30 轮下所有块 client 覆盖 ≥27/30，故 τ_c∈{0.33,0.5,0.67,0.9} 的 Ne 全部 ≈256（无区分度）。**有区分度的是前向/文档级覆盖**。
-- 数据（30 轮平均，240 forwards/轮；`dataset_v3/arxiv_16k/a01`）：
+#### 4.1.2 P0b：覆盖资格——**经数据检验后取消**（2026-10-14 用户决定）
+- 原动机：防止"有效样本数极小的块"靠运气进榜。**数据检验否定了其必要性**：
+  - 实测前向级有效计数（30 轮平均，240 forwards/轮）最低也有 **83/240**（block 255），典型尾部块 83–118，中部 ≥166，头部 ≈240；
+  - 参考系：满长样本（16384 token，填满全部 256 块）占比 34.5%（client train）/ 34.7%（emb global_train）/ 39.8%（predictor warmup）⇒ 块 255 的有效样本永远 ≈ 满长文档占比×240；
+  - 结论：**不存在"样本数少到均值不可用"的块**（std 比最优覆盖块 ≤1.7×），逐块有效均值（P0a）已足够，无需资格阈值。
+- 附（保留作历史证据）：client 级覆盖饱和（每 client 8 篇中≥1 篇满长 ⇒ 所有块 client 覆盖 ≥27/30），τ_c 类阈值无区分度；前向覆盖曲线 = 长度分布生存函数：
 
   | block | 0 | 50 | 91 | 100 | 150 | 199 | 200 | 250 | 255 |
   |---|---|---|---|---|---|---|---|---|---|
   | 前向覆盖 | 1.000 | 0.982 | 0.892 | 0.870 | 0.693 | 0.493 | 0.489 | 0.359 | 0.347 |
   | 有效样本 n | 240 | 236 | 214 | 209 | 166 | 118 | 117 | 86 | 83 |
 
-  参考系（doc 级）：emb 数据 global_train 中位长度 12725 token（≈block 198）、≥90% 文档覆盖到 block 91；predictor warmup 中位 13930（≈block 217）、≥90% 到 block 99。
-- **建议 τ_f = 0.5**（="该块在半数以上前向中存在"；对应 emb 中位文档边界 ≈block 199）：
-  - 每个合格块的有效样本 ≥ ~118/240（std 比最优覆盖块 ≤1.4×）→ 消除你担心的"低覆盖块靠运气进榜"；
-  - Ne ≈ 197（77% 块合格），掩码仍是全局行为、不退化；
-  - 备选：τ_f=0.9 → Ne≈88（保守，锚/反各 16）；τ_f=0.33 → Ne=256（=不过滤）。
-  - 实现：coverage = counts/前向数（counts 即 P0a 的逐块有效计数）；coverage<τ_f → mask=0（不合格块**不锚不反**，留给 predictor 自由选择）。
-  - τ_f 做成 config 项（默认 0.5），写入 run `config.json` 与轮记录（可复现）。
-- 零覆盖块（本数据不存在，仍兜底）→ mask=0。
+- **规则**：不做覆盖过滤；仅保留零覆盖兜底（counts=0 → 该块 mask=0 + WARN；本数据不存在此情况）。
 
-#### 4.1.3 P0c：打分边界 = **合格块百分比**（用户定）
-- 锚/反预算由"合格集合"决定：`k = max(1, floor(catv_r × Ne))`（catv_r=s/2=0.2；τ_f=0.5 时 Ne≈197 → **锚 39 / 反 39**，取代旧的固定 51/51）；
-- 在合格块内取 top-k → +inf、bottom-k → -inf；中间与不合格块 → 0；
-- `compute_consensus_mask` 需接收/计算 Ne（或直接接收合格掩码），保持既有 `r<s`、`s+r≤1` 校验语义不变（r 仍为比例）。
+#### 4.1.3 P0c：打分边界（**合格块百分比的退化形式**）
+- 用户规则："打分边界在 BERT 体系按块百分比"：`k = max(1, floor(catv_r × Ne))`，其中 `Ne` = 参与排序的块数；
+- 由于 P0b 取消（无资格过滤），**Ne ≡ N = 256** ⇒ **k = floor(0.2×256) = 51，即维持既有 51/51 预算**（公式保留以便审计/未来数据变更时复用）；
+- 在全部块内取 top-k → +inf、bottom-k → -inf，其余 0；`r<s`、`s+r≤1` 校验语义不变。
 
 #### 4.1.4 P1：两阶段聚合——**核查结论：已实现，无需改动**
 - 现状链路：`ClientRunner` 内 `_VoteAccumulator` 先对本 client 的前向取均值 → `result["votes"]` → 服务器 `accumulate_votes` 对 30 个 client 的均值**求和** → `compute_consensus_mask` 排序。
@@ -102,11 +98,11 @@
 - 默认 `config.keep_block0 = True`（在 `load_distilbert_classifier`/`patch_distilbert_sdpa_prune` 设置，写入 run `config.json` 供复现）；`last_prune_stats` 增加 `block0_kept`（与 `block0_forced`）。
 - 生效位置在 consensus_mask + topk 之后（即使掩码把 block0 置 −inf 也会被救回）；对 dense（`sparse>=1`）/未剪层无影响；**OPT 路径不动**。
 ### 4.3 测试/验证
-1. 单测：VoteAccumulator NaN 均值 + 无 NaN 等价（逐位）；block0 强制（构造 mask 把 block0 置 −inf → 断言 kept 含 0）；覆盖资格（构造 coverage<τ 的块 → 断言 mask=0 且不入锚/反）；
+1. 单测：VoteAccumulator NaN 均值（含"逐块有效计数不同"的用例）+ 无 NaN 等价（逐位）；block0 强制（构造 mask 把 block0 置 −inf → 断言 kept 含 0）；零覆盖兜底（构造全 pad 块 → 断言 mask=0 不参与 top/bottom）；
 2. 回归：`modeling_distilbert_smell` 16 项 selftest、`serial_fedavg._selftest`、`py_compile`；
-3. 复现测试：真实 240 篇重算投票（同一 round）→ 断言掩码 ≠ {0..50}/{205..255} 且 r0 与 r1 不再相同；同时输出：合格块数 Ne、锚/反计数（应 = floor(0.2·Ne)）、锚/反的位置分布（预期不再纯前缀/后缀）；
-4. **四版掩码对照**（同一份 round-0 数据 + 同一 free/mask 评测口径）：旧实现 / 仅 P0a / P0a+P0b / P0a+P0b+P0c → 掩码差异 + 评测 NLL（判断哪版掩码质量最好；同时验证 P0c 的预算缩放效果）；
-5. 覆盖率诊断落盘：逐层 coverage 直方图与零覆盖块计数（写入 round 记录或独立诊断 json）；
+3. 复现测试：真实 240 篇重算投票（同一 round）→ 断言掩码 ≠ {0..50}/{205..255} 且 r0 与 r1 不再相同；输出锚/反的位置分布（预期不再纯前缀/后缀）与逐块有效计数（预期 83–240）；
+4. **两版掩码对照**（同一份 round-0 数据 + 同一 free/mask 评测口径）：旧实现 vs P0a（+block0）→ 掩码差异 + 评测 NLL；
+5. 覆盖率/有效计数诊断落盘：逐块 counts 直方图与零覆盖块计数（写入 round 记录或独立诊断 json）；
 6. block0 诊断三连（500 样本，均为纯评测/回放，无训练）：
    a. 分层归因：只强保 layer4 的 block0 vs 只保 layer2+3；
    b. 相关性：per-sample "layer4 是否保 block0" × free 口径 per-sample NLL；
@@ -130,4 +126,5 @@
 | 10-14 11:18 | 新增 | 本 ailog v1 | vote 假象确认 + 修复交接 |
 | 10-14 13:55 | 修订 | 本 ailog v2 | 并入 D1–D4 决定 + §3 block0 论证 + §4.2 block0 规格 + §6 状态 |
 | 10-14 15:20 | 修订 | 本 ailog v3 | D5：P0+P1 定稿、P2 不做；§4.1 升级（P0a valid-mean / P0b 前向级覆盖资格 τ_f=0.5（数据表）/ P0c 合格块百分比预算；P1 核查=已实现）；§4.3 加四版掩码对照与覆盖诊断 |
-| 待办 | — | 代码修复由修复 agent 执行（4.1 P0a/b/c + 4.2 + 4.3） | 不影响运行中任务 |
+| 10-14 15:45 | 修订 | 本 ailog v4 | **P0b 覆盖资格取消**（数据：最坏块有效样本 83/240，无需阈值）；P0c 退化为原 51/51；§4.3 改两版对照；D5 更新 |
+| 待办 | — | 代码修复由修复 agent 执行（4.1 P0a + 4.1.3 退化预算 + 4.2 + 4.3） | 不影响运行中任务 |
