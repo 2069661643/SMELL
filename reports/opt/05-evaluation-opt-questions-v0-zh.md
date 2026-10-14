@@ -209,3 +209,82 @@
 2) **固定语料缺陷 + a01 数据瑕疵**请务必在论文/附录体现（表注一句 + 附录一小段），避免审稿人复现时发现。
 3) 需要我把 **fig1–fig4 统一成 Times/无标题/图例白底黑框** 的话请说一声（会重生成并更新包）。
 4) 若要把 a01/a03 合成双子图 (a)(b)，我可以在 `make_report.py` 加一个合并版 fig7，原 fig5/6 保留。
+
+---
+
+## F. 引用补录（实验侧回填，2026-10-14）
+
+**F1. 请提供以下可引用来源（HF 链接或 BibTeX）。**
+
+### F1.1 `sileod/discovery` 数据集
+
+- HF：<https://huggingface.co/datasets/sileod/discovery>（本仓 `build_discovery_16k.py` 用 id `sileod/discovery`，config `default`；license apache-2.0）
+- 代码/数据：<https://github.com/sileod/Discovery>
+- 论文（作者官方 BibTeX，来自 GitHub README）：Sileo et al., NAACL 2019, "Mining Discourse Markers for Unsupervised Sentence Representation Learning"（ACL Anthology N19-1351）。注意：**HF 卡片与论文是同一作者**；引用该论文即为该数据集的出处。
+
+### F1.2 LongICLBench（ICL 模板来源）
+
+- 论文：Li, Zhang, Do, Yue, Chen. "Long-context LLMs Struggle with Long In-context Learning." **TMLR 2025**（OpenReview `Cw2xlg0e46`，2025-03-26）；arXiv:2404.02060。
+- 代码：<https://github.com/TIGER-AI-Lab/LongICLBench>（MIT；Discovery 任务的模板在 `discovery_infer.py` / `data_preprocess.py`）
+- 数据：<https://huggingface.co/datasets/TIGER-Lab/LongICLBench>
+- 我们只**照抄模板与任务设置**（instruction/demo/query 三段式与 `the most suitable conjunction word in the previous ( ) is`），数据仍取 `sileod/discovery` 原始池自建 16k 分片。
+
+### F1.3 位置适配 B/C 与 Position Interpolation 的关系
+
+答：**思想对应、对象不同**，需要分开引用：
+- 我们的 B/C（`src/models/position_embed.py::extend_opt_positions(mode="interpolate")`）是对 **OPT 的学习式绝对位置表**做线性插值（`F.interpolate(..., mode="bilinear", align_corners=False)`，即半像素线性重采样 2048→16384，仅位置轴变化）再 BP 微调——这是 **ViT 那套"换长度就插值 position embedding 再微调"** 的标准做法（Dosovitskiy et al., ICLR 2021, Appendix B.1 有明确描述）。
+- **Position Interpolation（PI）**（Chen et al., 2023, arXiv:2306.15595）是同一"插值而非外推"思想，但其公式针对 **RoPE**；我们的模型没有 RoPE，**不宜写成"我们用了 PI"**，写成"we follow the position-interpolation principle" 并同时引 ViT 更严谨。
+- "学习式绝对嵌入不能外推"这一问题本身可引：ALiBi（Press et al., ICLR 2022）与 Kazemnejad et al.（NeurIPS 2023）。
+- 备选替代方案（正文若做 related work 可提）：Longformer（Beltagy et al., ACL 2020）用**复制**位置表扩展到 4096；RoPE/YaRN 等只适用于旋转位置。
+
+**建议写法（英文）**："Since OPT uses learned absolute position embeddings trained up to 2,048 tokens, zero-shot 16k evaluation collapses (G-PPL 398.8). Following the position-interpolation principle [Chen et al., 2023] — implemented, as in ViT, by linearly interpolating the learned embedding table and fine-tuning [Dosovitskiy et al., 2021] — we adapt the table (B) and additionally fine-tune LoRA adapters (C), recovering 31.4 / 18.1 G-PPL at 16k."
+
+**BibTeX**：
+
+```bibtex
+@inproceedings{sileo2019mining,
+  title = "Mining Discourse Markers for Unsupervised Sentence Representation Learning",
+  author = "Sileo, Damien and Van De Cruys, Tim and Pradel, Camille and Muller, Philippe",
+  booktitle = "Proceedings of NAACL-HLT 2019",
+  month = jun, year = "2019", address = "Minneapolis, Minnesota",
+  publisher = "Association for Computational Linguistics",
+  url = "https://www.aclweb.org/anthology/N19-1351", pages = "3477--3486",
+}
+
+@misc{li2024longcontext,
+  title={Long-context LLMs Struggle with Long In-context Learning},
+  author={Tianle Li and Ge Zhang and Quy Duc Do and Xiang Yue and Wenhu Chen},
+  year={2024}, eprint={2404.02060}, archivePrefix={arXiv}, primaryClass={cs.CL},
+}
+% TMLR 2025 版（若以正式期刊格式引用）：
+@article{li2025longcontext,
+  title={Long-context LLMs Struggle with Long In-context Learning},
+  author={Li, Tianle and Zhang, Ge and Do, Quy Duc and Yue, Xiang and Chen, Wenhu},
+  journal={Transactions on Machine Learning Research}, year={2025},
+  url={https://openreview.net/forum?id=Cw2xlg0e46},
+}
+
+@article{chen2023positional,
+  title={Extending Context Window of Large Language Models via Positional Interpolation},
+  author={Chen, Shouyuan and Wong, Sherman and Chen, Liangjian and Tian, Yuandong},
+  journal={arXiv preprint arXiv:2306.15595}, year={2023},
+}
+
+@inproceedings{dosovitskiy2021vit,
+  title={An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale},
+  author={Dosovitskiy, Alexey and Beyer, Lucas and Kolesnikov, Alexander and Weissenborn, Dirk and Zhai, Xiaohua and Unterthiner, Thomas and Dehghani, Mostafa and Minderer, Matthias and Heigold, Georg and Gelly, Sylvain and Uszkoreit, Jakob and Houlsby, Neil},
+  booktitle={International Conference on Learning Representations (ICLR)}, year={2021},
+}
+
+@inproceedings{press2022train,
+  title={Train Short, Test Long: Attention with Linear Biases Enables Input Length Extrapolation},
+  author={Press, Ofir and Smith, Noah A. and Lewis, Mike},
+  booktitle={International Conference on Learning Representations (ICLR)}, year={2022},
+}
+
+@inproceedings{kazemnejad2023impact,
+  title={The Impact of Positional Encoding on Length Generalization in Transformers},
+  author={Kazemnejad, Amirhossein and Padhi, Inkit and Natesan Ramamurthy, Karthikeyan and Das, Payel and Reddy, Siva},
+  booktitle={Advances in Neural Information Processing Systems (NeurIPS)}, year={2023},
+}
+```
