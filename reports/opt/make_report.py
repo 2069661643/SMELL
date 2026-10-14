@@ -402,6 +402,10 @@ def d_checks():
         ("D32 r8 full", "temp/eval_d32_r8.json", 32.4151),
         ("D32 r9 control", "temp/eval_d32_r9.json", 32.3408),
         ("fresh baseline full", "temp/eval_fresh_baseline.json", 33.6653),
+        ("dense r0 full", "temp/diag_dense_eval/r000.json", 26.4667),
+        ("dense r29 full", "temp/diag_dense_eval/r029.json", 26.0624),
+        ("sparse TD-3 r0 full", "logs/fed/zoo_k4_sparse_causal_a03_lr0.15_clip/a03/eval_round000.json", 33.6538),
+        ("sparse TD-3 r29 full", "logs/fed/zoo_k4_sparse_causal_a03_lr0.15_clip/a03/eval_round029.json", 33.2851),
     ]
     for label, path, expected in specs:
         if (REPO / path).exists():
@@ -897,7 +901,7 @@ def table3_quality(tabledir, datadir):
     ans_pair = load_json(REPO / "temp/diag_dense_eval/paired_r0_r29_answer.json")
     sparse_full = load_json(REPO / "temp/diag_compare/paired_sparse_r0_r29_full.json")
     sparse_ans = load_json(REPO / "temp/diag_compare/paired_sparse_r0_r29_answer.json")
-    sparse_r0 = xeval(REPO / "temp/eval_shared_r0_nomask.json")
+    sparse_r0 = xeval(REPO / "logs/fed/zoo_k4_sparse_causal_a03_lr0.15_clip/a03/eval_round000.json")
     sparse_r29 = xeval(REPO / "logs/fed/zoo_k4_sparse_causal_a03_lr0.15_clip/a03/eval_round029.json")
     rows2 = [
         ["dense (sparse=1.0)",
@@ -912,12 +916,14 @@ def table3_quality(tabledir, datadir):
          f"{sparse_ans['ppl_ratio_new_over_old']:.4f}", fmt_p(sparse_ans["p_two_sided"])],
     ]
     md = ("# Table 3 - Sparse-path quality\n\n"
-          "## 3a. Predictor/selection quality at 16k (n=4; small-n support row, not paired)\n\n"
+          "## 3a. Predictor/selection quality at 16k (n=4; small-n support row, not paired; "
+          "evaluated without the position checkpoint, so not comparable to the 500-sample rows)\n\n"
           + md_table(header1, rows1) + "\n\n"
           "## 3b. Dense vs sparse on the same adapters (paired per-sample, n=500)\n\n"
           + md_table(header2, rows2) + "\n\n"
-          "Ratios compare r29 vs r0; ratio < 1 means improved. Dense uses sparse=1.0 on the TD-3\n"
-          "adapters; sparse rows are the TD-3 arm itself.\n")
+          "Environment: OPT-350M + pos_only table, TD-3 adapters (LoRA r=1, a03, trained on the "
+          "sparse rho=0.4 path), fp32 sdpa_prune, 500-sample global test; dense = the same adapters "
+          "re-evaluated with sparse=1.0 (no pruning).\n")
     (tabledir / "table3_sparse_quality.md").write_text(md, encoding="utf-8")
     tex = tex_table("Sparse-path quality: predictor/selection variants at 16k (n=4).",
                     "tab:opt-quality", header1, rows1)
@@ -1205,7 +1211,7 @@ README_TEMPLATE = """# OPT-350M results package
 
 ## 已知 caveat（写盘时保留，勿在正文中抹平）
 
-- T3a 的 predictor/random/dense 对照只有 n=4（历史小样本），仅作支持行；
+- T3a 的 predictor/random/dense 对照只有 n=4（历史小样本，且未加载位置适配），仅作支持行；
   需要正式口径可用 GPU 空闲时以 500 样本重评（当前 GPU 被 BERT 链占用）。
 - pos_lora 训练曲线与权重不在本机（cloud A40 产物），T4/F4 用 `posemb_step1/MANIFEST.json`
   的终值；本机仅有 pos_only 的 metrics。

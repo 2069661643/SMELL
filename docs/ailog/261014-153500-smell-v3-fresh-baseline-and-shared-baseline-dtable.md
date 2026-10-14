@@ -46,3 +46,14 @@
 | 15:18 | 完成 | `temp/eval_fresh_baseline.json` | full 33.6653 / answer 1740.6 |
 | 15:25 | 修改 | `reports/opt/make_report.py` | `fresh_baseline()` + T7 改共享基线 + 新断言 |
 | 15:27 | 生成 | `reports/opt/tables/table7_d_comparison.*`、`data/*.csv`、README | 共享基线口径 |
+
+## 4. 追加（15:45）：table3b 数字订正（论文引用发现）
+
+- 作者转述论文句"dense 26.5 vs 稀疏（ρ=0.4）33.5"→ 与 `table3b` 当时的显示值一致，但 **33.5296 是贴错的值**
+  （误用 D32 臂的共享 r0；同一适配器应为 TD-3 的 r0=33.6538）。paired ratio（0.9890/1.0671）本身一直用的
+  是 TD-3 的 r0↔r29 配对，故修表后 ratio 与数值自洽。
+- 修正：`table3_quality` 的 sparse 行改为 `logs/fed/zoo_k4_sparse_causal_a03_lr0.15_clip/a03/eval_round000.json`
+  （33.6538/1743.8）；新增 4 条对账（dense r0/r29、sparse TD-3 r0/r29），总 43/43 PASS。
+- 环境注脚补齐：OPT-350M + pos_only、TD-3 适配器、fp32/sdpa_prune、n=500；dense=同适配器 sparse=1.0 重评。
+- T3a 注脚补"未加载位置适配（pos_checkpoint=None）"。
+- 待办：dense JSON 未记录 pos 标志（09-30 手动评测）；如要完全可审计可重跑一次 dense 评测（~10 min）。

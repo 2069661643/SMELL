@@ -49,7 +49,7 @@
 
 ## 已知 caveat（写盘时保留，勿在正文中抹平）
 
-- T3a 的 predictor/random/dense 对照只有 n=4（历史小样本），仅作支持行；
+- T3a 的 predictor/random/dense 对照只有 n=4（历史小样本，且未加载位置适配），仅作支持行；
   需要正式口径可用 GPU 空闲时以 500 样本重评（当前 GPU 被 BERT 链占用）。
 - pos_lora 训练曲线与权重不在本机（cloud A40 产物），T4/F4 用 `posemb_step1/MANIFEST.json`
   的终值；本机仅有 pos_only 的 metrics。
@@ -75,4 +75,4 @@ $PY reports/opt/make_report.py --no-check # 仅调试用
 
 ## 对账结果
 
-- 断言：39/39 PASS
+- 断言：43/43 PASS
