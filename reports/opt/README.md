@@ -16,6 +16,7 @@
 - `tables/table4_pos_adaptation.{md,tex}` — 位置适配判据表。
 - `tables/table5_micro_scans.{md,tex}` — 覆盖度微扫（k 扫描 + L×D 先导）。
 - `tables/table6_catv_r44_r74.{md,tex}` — CATV 三口径（off / on 同口径 / on 部署）在 r44/r74 的实际值与相对 r0 下降率。
+- `tables/table7_d_comparison.{md,tex}` — D 对照（D16/D22/D32，统一 8 轮窗口 r0→r7；D32 端点为 `adapter_round007` 事后补评）。
 - `data/*.csv` — 上述图表底层 tidy 数据（`arm_points.csv` 为全部曲线点）。
 
 ## 口径与数据来源
@@ -74,4 +75,4 @@ $PY reports/opt/make_report.py --no-check # 仅调试用
 
 ## 对账结果
 
-- 断言：32/32 PASS
+- 断言：38/38 PASS

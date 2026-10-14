@@ -392,6 +392,23 @@ EXPECTED = [
 ]
 
 
+def d_checks():
+    checks = []
+    specs = [
+        ("D16 r7 full", "temp/pilot_k24/K24_D16_lr0.30_c19.41/a03/eval_round007.json", 32.7144),
+        ("D22 r7 full", "temp/pilot_k24/K24_D22_lr0.30_c16.08/a03/eval_round007.json", 32.5335),
+        ("D32 r0 full", "temp/eval_shared_r0_nomask.json", 33.5296),
+        ("D32 r7 full", "temp/eval_d32_r7.json", 32.5071),
+        ("D32 r8 full", "temp/eval_d32_r8.json", 32.4151),
+        ("D32 r9 control", "temp/eval_d32_r9.json", 32.3408),
+    ]
+    for label, path, expected in specs:
+        if (REPO / path).exists():
+            got = xeval(REPO / path)[0]
+            checks.append((label, got, expected, 2e-3, abs(got - expected) <= 2e-3))
+    return checks
+
+
 def run_validation(arms):
     results = []
     for name, getter, expected, tol in EXPECTED:
@@ -571,7 +588,11 @@ def plot_series(ax, arm, metric, label, color, style="-", marker="o"):
 def save_fig(fig, outdir, stem):
     outdir.mkdir(parents=True, exist_ok=True)
     for ext in ("pdf", "png"):
-        fig.savefig(outdir / f"{stem}.{ext}", dpi=300)
+        path = outdir / f"{stem}.{ext}"
+        if ext == "pdf":
+            fig.savefig(path, dpi=300, metadata={"CreationDate": None})
+        else:
+            fig.savefig(path, dpi=300)
     return [outdir / f"{stem}.pdf", outdir / f"{stem}.png"]
 
 
@@ -968,6 +989,51 @@ def micro_rows():
     return out, pilot_rows
 
 
+def table7_d_comparison(tabledir, datadir):
+    """D comparison over the unified 8-round window (r0 -> r7), full G-PPL.
+
+    D16/D22 from the 8-round pilots (temp/pilot_k24); D32 from the 30-round main run,
+    endpoint = post-hoc eval of adapter_round007 (aligned to the pilots' 8th round);
+    r8/r9 shown as extended points in the footnote.
+    """
+    cells = [
+        ("16", "temp/pilot_k24/K24_D16_lr0.30_c19.41/a03/eval_round000.json",
+         "temp/pilot_k24/K24_D16_lr0.30_c19.41/a03/eval_round007.json", "19.41"),
+        ("22", "temp/pilot_k24/K24_D22_lr0.30_c16.08/a03/eval_round000.json",
+         "temp/pilot_k24/K24_D22_lr0.30_c16.08/a03/eval_round007.json", "16.08"),
+        ("32", "temp/eval_shared_r0_nomask.json",
+         "temp/eval_d32_r7.json", "12.61"),
+    ]
+    header = ["D", "window", "r0 full PPL", "endpoint full PPL", "delta", "delta %"]
+    rows = []
+    for d, r0_path, end_path, clip in cells:
+        r0 = xeval(REPO / r0_path)
+        end = xeval(REPO / end_path)
+        delta = end[0] - r0[0]
+        rows.append([d, "r0->r7", f"{r0[0]:.4f}", f"{end[0]:.4f}",
+                     f"{delta:+.4f}", f"{delta / r0[0] * 100.0:+.2f}"])
+    extras = []
+    for label, path in [("r8", "temp/eval_d32_r8.json"), ("r9", "temp/eval_d32_r9.json")]:
+        if (REPO / path).exists():
+            value = xeval(REPO / path)[0]
+            extras.append(f"{label} {value:.4f}")
+    extra_txt = (" D32 extended points (not in the unified window): " + ", ".join(extras) + "."
+                 if extras else "")
+    note = ("All rows use the 8-round window (r0 = after round 0, r7 = after round 8; eval_every=1). "
+            "D16/D22 from the 8-round pilots; D32 endpoint is a post-hoc eval of the 30-round run's "
+            "adapter_round007 (the in-run eval grid is every 5 rounds). Each row's r0 is that arm's own "
+            "post-round-0 state (fixed order, first 2 samples/client per round)."
+            + extra_txt + "\n")
+    md = "# Table 7 - D comparison (unified 8-round window, full G-PPL)\n\n" + note + "\n" + md_table(header, rows) + "\n"
+    (tabledir / "table7_d_comparison.md").write_text(md, encoding="utf-8")
+    tex = tex_table("D comparison over the unified 8-round window (full G-PPL).",
+                    "tab:opt-d", ["D", "window", "r0", "endpoint", "$\\Delta$", "$\\Delta$ \\%"],
+                    [[r[0], r[1], r[2], r[3], r[4], r[5].replace("%", "\\%")] for r in rows])
+    (tabledir / "table7_d_comparison.tex").write_text(tex, encoding="utf-8")
+    write_csv(datadir / "table7_d_comparison.csv", header, rows)
+    return header, rows
+
+
 def _times_plt():
     plt = _plt()
     plt.rcParams.update({
@@ -1091,6 +1157,7 @@ README_TEMPLATE = """# OPT-350M results package
 - `tables/table4_pos_adaptation.{md,tex}` — 位置适配判据表。
 - `tables/table5_micro_scans.{md,tex}` — 覆盖度微扫（k 扫描 + L×D 先导）。
 - `tables/table6_catv_r44_r74.{md,tex}` — CATV 三口径（off / on 同口径 / on 部署）在 r44/r74 的实际值与相对 r0 下降率。
+- `tables/table7_d_comparison.{md,tex}` — D 对照（D16/D22/D32，统一 8 轮窗口 r0→r7；D32 端点为 `adapter_round007` 事后补评）。
 - `data/*.csv` — 上述图表底层 tidy 数据（`arm_points.csv` 为全部曲线点）。
 
 ## 口径与数据来源
@@ -1182,6 +1249,7 @@ def main():
 
     arms = build_arms()
     checks = run_validation(arms)
+    checks.extend(d_checks())
     catv = catv_rows()
 
     print("== ailog cross-checks (PPL) ==")
@@ -1227,6 +1295,7 @@ def main():
         table4_pos_adapt(tabledir, datadir)
         table5_micro(tabledir, datadir)
         table6_endpoints(arms, tabledir, datadir)
+        table7_d_comparison(tabledir, datadir)
         dump_series(arms, datadir)
         for path in sorted(tabledir.iterdir()):
             print(f"  {path.relative_to(REPO)}")
