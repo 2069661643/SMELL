@@ -37,21 +37,21 @@ P0b 覆盖资格按 v4 决定取消（数据：最坏块有效样本 83/240 ⇒ 
 
 ## 三、缺陷臂归档（D1/D4：仅存档，禁用于论文）
 
-`checkpoints/distilbert_ablation_r30_defect/`（含缺陷 `README.md` + 每臂 `SHA256SUMS`）：
+`checkpoints/distilbert_ablation_r30_defect/`（含缺陷 `README.md` + 每臂 `SHA256SUMS`）；**a03_on 由用户停机且无产物 → 归档定格 3/4 臂**：
 
 | 臂 | own ΔNLL%（30 轮，缺陷口径） | adapter sha256（前缀） |
 |---|---|---|
 | r30_a01_catv_off | +8.29% | `b43978ee…` |
 | r30_a01_catv_on | +1.72%（含前缀假象注水） | `d3be4e4e…` |
 | r30_a03_catv_off | +11.86% | `5160c96d…` |
-| r30_a03_catv_on | 链上运行（~21:30 完），跑完补录 | — |
+| r30_a03_catv_on | **空产物**：14:21:58 启动后被用户停机（D4；rc 记账为 0，无 metrics/无 adapter） | — |
 
 `docs/weight-manifest.md` 已新增 §6（BERT 线产物 sha256 + 即用运行口径）。
 
-## 四、后续（待用户拍板）
+## 四、后续
 
 1. **修复版 4 臂 r30**（α×CATV，L8D8/lr=1.4e-3/cycle/eval500）：脚本 `temp/run_bert_da_fixed_chain_bg.sh`（含逐臂自动归档 `checkpoints/distilbert_ablation_r30_fixed/` + 自动报告）。
-   - 阻塞项：a03_catv_on（缺陷臂）仍占 GPU 至 ~21:30。等它跑完再启（默认，不动运行中任务），或由用户停机后立即启。
+   - 14:36 起：挂「用户 OPT 补评任务（run_d32_r7r8）结束 → 自动启动本链」衔接器（避免 GPU 争用）。
 2. 修复后的预期：on 臂起点不再有前缀假象注水（缺陷 on 臂 r0 NLL 1.5424 vs off 臂 1.8060 的差将收缩），CATV 对照变干净。
 
 ## 五、变更列表
