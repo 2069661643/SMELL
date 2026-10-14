@@ -71,3 +71,40 @@ cd <dest>/SMELLv3 && sha256sum \
 ## 5. 环境
 
 `smell-v2`（torch 2.1.2+cu118 / flash-attn 2.4.2 / transformers 4.45.2 / peft 0.19.1）；jenga 为 editable 安装（源 `JengaForMemoryTest/Jenga/src`），需保证 `import jenga` 可用。规范见 `AGENTS.md` 与 `docs/standard.md`。
+
+## 6. DistilBERT（BERT 线）产物与运行口径（261014）
+
+> 权重隔离：全部 `distilbert_*` 前缀，与 OPT 产物零混用；数据在 `dataset_v3/arxiv_16k/`（α=0.1/0.3，30 clients × (100+16)，seq 16384）。
+
+### 6.1 底座（USE）
+
+| 用途 | 相对路径 | 大小 | sha256 |
+|---|---|---|---|
+| Step1 位置表（pos+head 1000 步，16k） | `checkpoints/distilbert_step1/a01_pos_head_1000step/pos_embed.pt` | 48M | `bbf3f805b66532338b480e714c47824e2cb61a9428a28b9ad52a54777de8e58f` |
+| Step1 分类头（FL 冻结；D3） | `checkpoints/distilbert_step1/a01_pos_head_1000step/head.pt` | 2.3M | `dbab4ff8bd0b632ede96f533d2591fe389a01415a2f037dd6b027f68f0de0c20` |
+| predictor（400 步 warmup，双向池化目标） | `checkpoints/predictor_bert/a01_warmup_400step/predictor.pth` | 45M | `e0925b222396543e7d1e07d48c5316e33cb4cf33c5aec02e6f0db8190c1c7b1c` |
+| pruned_config（必须成对） | `checkpoints/predictor_bert/a01_warmup_400step/pruned_config.pth` | 1.5K | `922bbce0463489834b5d95fa21d735442f2062ed96ce43e7c60f66ed54809929` |
+
+### 6.2 r30 四臂消融 —— **含缺陷臂存档**（D1/D4：仅存档，禁用于论文）
+
+`checkpoints/distilbert_ablation_r30_defect/`（含 `README.md` 缺陷说明 + 每臂 `SHA256SUMS`）。缺陷：CATV 投票 padding 占位（掩码冻结 {0..50}/{205..255}）+ 无 block0 强保；修复见 ailog `261014-111800`（P0a valid-mean + D2 block0）。
+
+| 臂 | adapter sha256 | 缺陷臂 own ΔNLL%（30 轮） |
+|---|---|---|
+| `r30_a01_catv_off` | `b43978eec592de086d32a1c2462fa72f93beb036ce000e75bda47ace45f1b98b` | +8.29% |
+| `r30_a01_catv_on` | `d3be4e4e9ac2142e2c76480d4b69530b6add11dd27ab383c35b1fea9ac69a925` | +1.72%（掩码假象注水） |
+| `r30_a03_catv_off` | `5160c96d1b9eea22f3a867997e7d5642e7fb9e09f53099e8eddfbd4cf818c6bb` | +11.86% |
+| `r30_a03_catv_on` | （链上运行，跑完后补录） | — |
+
+### 6.3 运行口径（复制即用）
+
+```bash
+--arch distilbert --attn sdpa_prune --dtype fp32 --sparse 0.4 --doc-order cycle \
+--pos-checkpoint checkpoints/distilbert_step1/a01_pos_head_1000step/pos_embed.pt \
+--head-checkpoint checkpoints/distilbert_step1/a01_pos_head_1000step/head.pt \
+--predictor checkpoints/predictor_bert/a01_warmup_400step/predictor.pth \
+--pruned-config checkpoints/predictor_bert/a01_warmup_400step/pruned_config.pth \
+--trainer zoo --zo-subspace layers --zo-layers 0-5 --zo-directions 8 --zo-eps 1e-3 \
+--local-steps 8 --lr 1.4e-3 --delta-clip 1.0 --lora-r 1 --lora-alpha 2 \
+--max-clients 30 --rounds 30 --catv {off,on} --eval-every 1 --eval-max-samples 500
+```

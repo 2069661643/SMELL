@@ -29,7 +29,12 @@ def resolve_model_config(model):
 
 
 class _VoteAccumulator:
-    """逐层累积 CATV 块投票：每次 forward 累加 batch 维总和与行数，最后取均值。"""
+    """逐层累积 CATV 块投票：**逐块有效均值（NaN-aware，P0a）**。
+
+    旧实现以标量行数做分母、把 pad 占位符（-3.4e38）当有效分 → 掩码恒为 {0..50}/{205..255}
+    （ailog 261014-111800 §1）。新实现：sums 用 nansum 逐块累加，counts 为**逐块有效计数向量**，
+    average = sums / counts.clamp(min=1)，零覆盖块 → 0 + WARN。无 NaN 输入下与旧实现逐位等价（OPT 路径不变）。
+    """
 
     def __init__(self, first_layer, last_layer):
         self.first_layer = int(first_layer)
@@ -44,21 +49,27 @@ class _VoteAccumulator:
         values = block_scores.detach().float()
         if values.dim() == 1:
             values = values.unsqueeze(0)
-        total = values.sum(dim=0)
+        valid = ~torch.isnan(values)
+        total = torch.nansum(values, dim=0)
+        counts = valid.sum(dim=0)
         if layer_idx in self.sums:
             self.sums[layer_idx] = self.sums[layer_idx] + total
-            self.counts[layer_idx] += int(values.size(0))
+            self.counts[layer_idx] = self.counts[layer_idx] + counts
         else:
             self.sums[layer_idx] = total.clone()
-            self.counts[layer_idx] = int(values.size(0))
+            self.counts[layer_idx] = counts.clone()
 
     def average(self):
-        return {
-            layer: (self.sums[layer] / float(self.counts[layer])).detach().to(
-                device="cpu", dtype=torch.float32
-            ).clone()
-            for layer in sorted(self.sums)
-        }
+        out = {}
+        for layer in sorted(self.sums):
+            counts = self.counts[layer]
+            zero = counts <= 0
+            mean = self.sums[layer] / counts.clamp(min=1)
+            if bool(zero.any()):
+                print(f"[votes] WARN layer {layer}: {int(zero.sum())} block(s) with zero valid coverage -> 0")
+                mean = mean.masked_fill(zero, 0.0)
+            out[layer] = mean.detach().to(device="cpu", dtype=torch.float32).clone()
+        return out
 # SMELL 3 CATV votes END
 
 
@@ -310,17 +321,38 @@ def _selftest():
         records = [json.loads(line) for line in jsonl_path.read_text().splitlines()]
     jsonl_ok = len(records) == 2 and records[1]["round"] == 1
 
+    # SMELL 3 serial_fedavg vote_valid_mean ADD — P0a：逐块有效均值（NaN=pad 剔除）、零覆盖兜底、层过滤、无 NaN 等价
+    vote_acc = _VoteAccumulator(0, 2)
+    vote_acc(0, torch.tensor([[1.0, 2.0, float("nan")],
+                              [3.0, float("nan"), float("nan")]]))
+    vote_acc(0, torch.tensor([[5.0, 4.0, float("nan")]]))
+    vote_acc(1, torch.tensor([[2.0, 6.0]]))
+    vote_acc(3, torch.tensor([[9.0, 9.0]]))
+    vote_mean = vote_acc.average()
+    results_votes = {
+        "vote valid mean per block": bool(
+            set(vote_mean) == {0, 1}
+            and torch.allclose(vote_mean[0], torch.tensor([3.0, 3.0, 0.0]))
+            and torch.allclose(vote_mean[1], torch.tensor([2.0, 6.0]))),
+    }
+    finite_acc = _VoteAccumulator(0, 0)
+    finite_acc(0, torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+    results_votes["vote finite equivalence"] = bool(
+        torch.allclose(finite_acc.average()[0], torch.tensor([2.0, 3.0])))
+
     print(f"samples  agg w={samples['w'].tolist()} b={samples['b'].tolist()}")
     print(f"         manual w={manual_w.tolist()} b={manual_b.tolist()}")
     print(f"equal    agg w={equal['w'].tolist()} b={equal['b'].tolist()}")
     print(f"         manual w={equal_manual_w.tolist()} b={equal_manual_b.tolist()}")
     print(f"consistency_check mismatch raised: {mismatch_raised}")
     print(f"append_metrics jsonl records: {len(records)}")
+    print(f"vote valid-mean layer0={vote_mean[0].tolist()} layer1={vote_mean[1].tolist()}")
     results = {
         "samples weighting": samples_ok,
         "equal weighting": equal_ok,
         "consistency_check": mismatch_raised,
         "append_metrics": jsonl_ok,
+        **results_votes,
     }
     for name, ok in results.items():
         print(f"[{'PASS' if ok else 'FAIL'}] {name}")

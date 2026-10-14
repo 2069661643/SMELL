@@ -718,6 +718,8 @@ def main():
         "arch": args.arch,
         "resolved_head_checkpoint": str(resolve(args.head_checkpoint)) if args.head_checkpoint else None,
         "num_labels": args.num_labels,
+        # SMELL 3 run_fed keep_block0 ADD — BERT 特供剪枝策略（D2，ailog 261014-111800 §4.2）落盘复现
+        "keep_block0": bool(getattr(base_config, "keep_block0", False)) if args.arch == "distilbert" else None,
         # SMELL 3 run_fed doc_order config ADD — 客户端取数协议（可复现性）
         "doc_order": args.doc_order,
         # SMELL 3 run_fed rank_rotation config ADD — LoRA 秩数（rank_mode/rank_k 来自 vars(args)）

@@ -196,12 +196,15 @@ class DistilBertSdpaPruneAttention(DistilBertSdpaAttention):
                     f"predictor output {tuple(scores.shape)} != ({bsz}, {n_blocks}, {n_blocks})")
             scores = scores.float().sum(dim=-2)
             block_keep = keep_mask.view(bsz, n_blocks, pool).amax(dim=-1)
+            pad_block = block_keep < 0.5
             # SMELL 3 modeling_distilbert_smell sdpa_prune ADD — 全 padding 块置 -inf，不占 topk 预算
-            scores = scores.masked_fill(block_keep < 0.5, torch.finfo(scores.dtype).min)
-            # SMELL 3 modeling_distilbert_smell sdpa_prune_vote ADD — CATV 上报掩码前原始块分（与 OPT 同）
+            scores = scores.masked_fill(pad_block, torch.finfo(scores.dtype).min)
+            # SMELL 3 modeling_distilbert_smell vote_valid_mean FIXED — 投票载荷以 NaN 标注 pad 块（有效均值口径，P0a）；
+            # 旧版把 -3.4e38 占位符直接送进投票 → 掩码恒为 {0..50}/{205..255}（ailog 261014-111800 §1）
             vote_callback = getattr(self.config, "vote_callback", None)
             if vote_callback is not None:
-                vote_callback(self.layer_idx, scores.detach())
+                vote_payload = scores.masked_fill(pad_block, float("nan"))
+                vote_callback(self.layer_idx, vote_payload.detach())
             consensus_mask = getattr(self.config, "consensus_mask", None)
             if consensus_mask is not None and self.layer_idx in consensus_mask:
                 scores = scores + consensus_mask[self.layer_idx].to(
@@ -209,6 +212,18 @@ class DistilBertSdpaPruneAttention(DistilBertSdpaAttention):
             keep_blocks = max(1, min(int(n_blocks * sparse), n_blocks))
             _, idx = torch.topk(scores, keep_blocks, largest=True, dim=-1)
             idx = idx.sort(dim=-1).values
+            # SMELL 3 modeling_distilbert_smell keep_block0 ADD — BERT 特供（D2，ailog 261014-111800 §4.2）：
+            # block0 载 [CLS]（唯一 readout），所有剪枝层强制保留；挤位规则 = 丢已入选块中分数最低者（block0 自身不可丢）；
+            # 位置在 consensus_mask + topk 之后（掩码把 block0 置 -inf 也会被救回）；keep 预算不变。
+            block0_forced = 0
+            if bool(getattr(self.config, "keep_block0", True)):
+                miss = ~(idx == 0).any(dim=-1)
+                if bool(miss.any()):
+                    sel = scores.gather(1, idx).masked_fill(idx == 0, float("inf"))
+                    idx = idx.clone()
+                    idx[miss, sel[miss].argmin(dim=-1)] = 0
+                    idx = idx.sort(dim=-1).values
+                    block0_forced = int(miss.sum())
             base = torch.arange(pool, device=query.device).view(1, 1, pool)
             expanded = (idx[..., None] * pool + base).reshape(bsz, -1)
 
@@ -240,6 +255,9 @@ class DistilBertSdpaPruneAttention(DistilBertSdpaAttention):
             "kept_tokens": int(expanded.size(1)),
             "full_tokens": int(q_len),
             "keep_frac": float(expanded.size(1)) / float(q_len),
+            # SMELL 3 modeling_distilbert_smell keep_block0 ADD — block0 诊断（D2 验收用）
+            "block0_kept": bool((idx == 0).any(dim=-1).all()),
+            "block0_forced": int(block0_forced),
         }
         if output_attentions:
             return (output, None)
@@ -251,6 +269,9 @@ def patch_distilbert_sdpa_prune(model, predictor_layers=None):
     from jenga.models.predictor import PrunableAttnPredictorInfer
 
     core = _find_distilbert_core(model)
+    # SMELL 3 modeling_distilbert_smell keep_block0 ADD — BERT 特供默认开启（D2；写进 config 供 run config.json 复现）
+    if getattr(core, "config", None) is not None:
+        core.config.keep_block0 = bool(getattr(core.config, "keep_block0", True))
     patched = 0
     built = 0
     for layer_idx, layer in enumerate(core.transformer.layer):
@@ -497,6 +518,35 @@ def _run_selftest():
     results["prune vote_callback layers"] = sorted(votes) == [1, 2]
     results["prune vote_callback shape"] = bool(
         tuple(votes[1].shape) == (2, 2) and votes[1].dtype == torch.float32)
+
+    # SMELL 3 modeling_distilbert_smell vote_valid_mean ADD — P0a：pad 块以 NaN 上报（有效均值口径），有效块保持有限
+    short_ids = torch.randint(1, prune_config.vocab_size, (1, 128))
+    short_ids[0, 40:] = 0
+    short_mask = (short_ids != 0).long()
+    votes_short = {}
+    prune_config.vote_callback = lambda layer_idx, payload: votes_short.__setitem__(int(layer_idx), payload)
+    with torch.no_grad():
+        prune_model(input_ids=short_ids, attention_mask=short_mask)
+    prune_config.vote_callback = None
+    payload = votes_short[1][0]
+    results["vote payload NaN on pad blocks"] = bool(
+        torch.isfinite(payload[0]) and torch.isnan(payload[1]))
+
+    # SMELL 3 modeling_distilbert_smell keep_block0 ADD — D2：-inf 掩码下 block0 仍被保留；关闭开关时不救
+    prune_config.consensus_mask = {1: torch.tensor([float("-inf"), 0.0]),
+                                   2: torch.tensor([float("-inf"), 0.0])}
+    with torch.no_grad():
+        prune_model(input_ids=seq_ids, attention_mask=seq_mask)
+    stats_layer1 = prune_model.distilbert.transformer.layer[1].attention.last_prune_stats
+    results["block0 forced under -inf mask"] = bool(
+        stats_layer1["block0_kept"] and stats_layer1["block0_forced"] >= 1)
+    prune_config.keep_block0 = False
+    with torch.no_grad():
+        prune_model(input_ids=seq_ids, attention_mask=seq_mask)
+    stats_layer1 = prune_model.distilbert.transformer.layer[1].attention.last_prune_stats
+    results["block0 not forced when disabled"] = bool(stats_layer1["block0_kept"] is False)
+    prune_config.keep_block0 = True
+    prune_config.consensus_mask = None
 
     prune_config.sparse = 1.0
     with torch.no_grad():
