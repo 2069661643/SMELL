@@ -401,6 +401,7 @@ def d_checks():
         ("D32 r7 full", "temp/eval_d32_r7.json", 32.5071),
         ("D32 r8 full", "temp/eval_d32_r8.json", 32.4151),
         ("D32 r9 control", "temp/eval_d32_r9.json", 32.3408),
+        ("fresh baseline full", "temp/eval_fresh_baseline.json", 33.6653),
     ]
     for label, path, expected in specs:
         if (REPO / path).exists():
@@ -989,45 +990,59 @@ def micro_rows():
     return out, pilot_rows
 
 
-def table7_d_comparison(tabledir, datadir):
-    """D comparison over the unified 8-round window (r0 -> r7), full G-PPL.
+def fresh_baseline():
+    """Pre-training baseline (base + pos_only, identity LoRA) on the shared 500-sample test."""
+    path = REPO / "temp/eval_fresh_baseline.json"
+    if not path.exists():
+        return None
+    return xeval(path)
 
-    D16/D22 from the 8-round pilots (temp/pilot_k24); D32 from the 30-round main run,
-    endpoint = post-hoc eval of adapter_round007 (aligned to the pilots' 8th round);
-    r8/r9 shown as extended points in the footnote.
+
+def table7_d_comparison(tabledir, datadir):
+    """D comparison over the unified 8-round window (full G-PPL).
+
+    Primary deltas use the shared pre-training baseline (measured 2026-10-14); each arm's
+    own post-round-0 r0 is kept in the footnote. D16/D22 from the 8-round pilots; D32
+    endpoint = post-hoc eval of the 30-round run's adapter_round007.
     """
     cells = [
         ("16", "temp/pilot_k24/K24_D16_lr0.30_c19.41/a03/eval_round000.json",
-         "temp/pilot_k24/K24_D16_lr0.30_c19.41/a03/eval_round007.json", "19.41"),
+         "temp/pilot_k24/K24_D16_lr0.30_c19.41/a03/eval_round007.json"),
         ("22", "temp/pilot_k24/K24_D22_lr0.30_c16.08/a03/eval_round000.json",
-         "temp/pilot_k24/K24_D22_lr0.30_c16.08/a03/eval_round007.json", "16.08"),
+         "temp/pilot_k24/K24_D22_lr0.30_c16.08/a03/eval_round007.json"),
         ("32", "temp/eval_shared_r0_nomask.json",
-         "temp/eval_d32_r7.json", "12.61"),
+         "temp/eval_d32_r7.json"),
     ]
-    header = ["D", "window", "r0 full PPL", "endpoint full PPL", "delta", "delta %"]
+    fresh = fresh_baseline()
+    header = ["D", "window", "baseline (pre-r0, shared)", "endpoint full PPL", "delta", "delta %"]
     rows = []
-    for d, r0_path, end_path, clip in cells:
-        r0 = xeval(REPO / r0_path)
-        end = xeval(REPO / end_path)
-        delta = end[0] - r0[0]
-        rows.append([d, "r0->r7", f"{r0[0]:.4f}", f"{end[0]:.4f}",
-                     f"{delta:+.4f}", f"{delta / r0[0] * 100.0:+.2f}"])
+    own_notes = []
+    for d, r0_path, end_path in cells:
+        own_r0 = xeval(REPO / r0_path)[0]
+        end = xeval(REPO / end_path)[0]
+        base = fresh[0] if fresh is not None else own_r0
+        delta = end - base
+        rows.append([d, "pre-r0->r7", f"{base:.4f}", f"{end:.4f}",
+                     f"{delta:+.4f}", f"{delta / base * 100.0:+.2f}"])
+        own_notes.append(f"D{d} own r0 {own_r0:.4f} ({end - own_r0:+.4f})")
     extras = []
     for label, path in [("r8", "temp/eval_d32_r8.json"), ("r9", "temp/eval_d32_r9.json")]:
         if (REPO / path).exists():
-            value = xeval(REPO / path)[0]
-            extras.append(f"{label} {value:.4f}")
+            extras.append(f"{label} {xeval(REPO / path)[0]:.4f}")
     extra_txt = (" D32 extended points (not in the unified window): " + ", ".join(extras) + "."
                  if extras else "")
-    note = ("All rows use the 8-round window (r0 = after round 0, r7 = after round 8; eval_every=1). "
+    base_note = ("Shared pre-training baseline = base model + pos_only table with identity LoRA "
+                 "(PEFT B=0), same 500-sample protocol; measured once (full 33.6653 / answer 1740.6), "
+                 "applies to all arms." if fresh is not None else
+                 "Per-arm post-round-0 r0 used (pre-training baseline not measured).")
+    note = (f"{base_note} All rows use the 8-round window (r7 = after round 8; eval_every=1). "
             "D16/D22 from the 8-round pilots; D32 endpoint is a post-hoc eval of the 30-round run's "
-            "adapter_round007 (the in-run eval grid is every 5 rounds). Each row's r0 is that arm's own "
-            "post-round-0 state (fixed order, first 2 samples/client per round)."
-            + extra_txt + "\n")
+            "adapter_round007 (the in-run eval grid is every 5 rounds). "
+            + "; ".join(own_notes) + "." + extra_txt + "\n")
     md = "# Table 7 - D comparison (unified 8-round window, full G-PPL)\n\n" + note + "\n" + md_table(header, rows) + "\n"
     (tabledir / "table7_d_comparison.md").write_text(md, encoding="utf-8")
-    tex = tex_table("D comparison over the unified 8-round window (full G-PPL).",
-                    "tab:opt-d", ["D", "window", "r0", "endpoint", "$\\Delta$", "$\\Delta$ \\%"],
+    tex = tex_table("D comparison over the unified 8-round window (full G-PPL; shared pre-training baseline).",
+                    "tab:opt-d", ["D", "window", "baseline", "endpoint", "$\\Delta$", "$\\Delta$ \\%"],
                     [[r[0], r[1], r[2], r[3], r[4], r[5].replace("%", "\\%")] for r in rows])
     (tabledir / "table7_d_comparison.tex").write_text(tex, encoding="utf-8")
     write_csv(datadir / "table7_d_comparison.csv", header, rows)
@@ -1157,7 +1172,7 @@ README_TEMPLATE = """# OPT-350M results package
 - `tables/table4_pos_adaptation.{md,tex}` — 位置适配判据表。
 - `tables/table5_micro_scans.{md,tex}` — 覆盖度微扫（k 扫描 + L×D 先导）。
 - `tables/table6_catv_r44_r74.{md,tex}` — CATV 三口径（off / on 同口径 / on 部署）在 r44/r74 的实际值与相对 r0 下降率。
-- `tables/table7_d_comparison.{md,tex}` — D 对照（D16/D22/D32，统一 8 轮窗口 r0→r7；D32 端点为 `adapter_round007` 事后补评）。
+- `tables/table7_d_comparison.{md,tex}` — D 对照（D16/D22/D32，统一 8 轮窗口；**以训练前共享基线 33.6653 起算**，行内保留各臂 own-r0 备注）。
 - `data/*.csv` — 上述图表底层 tidy 数据（`arm_points.csv` 为全部曲线点）。
 
 ## 口径与数据来源
