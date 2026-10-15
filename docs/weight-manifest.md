@@ -96,7 +96,20 @@ cd <dest>/SMELLv3 && sha256sum \
 | `r30_a03_catv_off` | `5160c96d1b9eea22f3a867997e7d5642e7fb9e09f53099e8eddfbd4cf818c6bb` | +11.86% |
 | `r30_a03_catv_on` | （链上运行，跑完后补录） | — |
 
-### 6.3 运行口径（复制即用）
+### 6.3 r30 四臂消融 —— **修复版**（USE；CATV 显著有效，见 ailog `261015-213000`）
+
+`checkpoints/distilbert_ablation_r30_fixed/`（每臂 `adapter_round029/` + `metrics.jsonl` + `config.json` + `SHA256SUMS`；`keep_block0=True`）。
+
+| 臂 | adapter sha256 | r0→r29 NLL | ΔNLL%（own） | acc |
+|---|---|---|---|---|
+| `r30_a01_catv_off` | `6b83f8fa104cdbcbd00c977eb5529a1d53cea0038afcaabb234cfa2a5485f15b` | 1.6910→1.5836 | +6.35% | .424→.468 |
+| `r30_a01_catv_on` | `ed72c112464e0dec0b7f611b4749911248dfb1a0c7efc1aea91801e51c058a2a` | 1.7527→1.5563 | +11.20% | .408→.458 |
+| `r30_a03_catv_off` | `ab80899cd03f5c5f4e1469070fb764cc3e0b566af99720a09a2d16cdd7436741` | 1.6906→1.5887 | +6.03% | .426→.466 |
+| `r30_a03_catv_on` | `8684622738f960cf13a2678141d8b9cb891b60b796acaee8e96fa3446fd52a20` | 1.7511→1.5484 | +11.57% | .410→.454 |
+
+配对（n=500）：on vs off @r29 a01 p=0.030 / a03 p=0.0025（均显著）。
+
+### 6.4 运行口径（复制即用）
 
 ```bash
 --arch distilbert --attn sdpa_prune --dtype fp32 --sparse 0.4 --doc-order cycle \
