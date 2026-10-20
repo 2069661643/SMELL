@@ -61,9 +61,11 @@
 
 ## 五、新 run
 
-- 待启动：`logs/fed/bert_vq050_bf16_perresult_a03/`，`rate=0.5`、bf16、C=64、c_dim=18,432、r30、CATV off、a03。
+- 已启动 16:15:08：`logs/fed/bert_vq050_bf16_perresult_a03/`，`rate=0.5`、bf16、C=64、c_dim=18,432、r30、CATV off、a03。
 - 归档目标：`checkpoints/distilbert_vq050_bf16_perresult_a03_r30/`。
-- 首轮重点检查：`c_dim=18432`、`per_result=0.5`、`total_ratio=32`、`vq_ratio_bytes=0.5`、`vq_cos_mean≈0.98–0.99`、`vq_communication_bytes` 是 `dense_all_results_communication_bytes` 的 0.5。
+- **r0 实测（16:29）**：`c_dim=18432`、`per_result=0.5`、`total_ratio=32`、`vq_ratio_bytes=0.5`、
+  `vq_cos_mean=0.9946`、`vq_communication_bytes=70,778,880` vs `dense_all=141,557,760`；
+  eval **NLL 1.6907 / acc 0.426**（无 VQ 基线 r0 1.6906/0.426）；训练 771.4s。
 
 ## 六、caveat
 
@@ -80,3 +82,4 @@
 | 16:15 | 修改 | `run_fed.py` | `c_dim=rate*d`；per-result/total metrics |
 | 16:20 | 修改 | `AGENTS.md` | VQ 段改 per-result |
 | 16:20 | 新增 | 本 ailog | 架构 + smoke + 旧 run 存档 |
+| 16:29 | 验证 | per-result 0.5 bf16 r0 | c_dim 18432；cos 0.9946；ratio_bytes 0.5；NLL 1.6907 |
