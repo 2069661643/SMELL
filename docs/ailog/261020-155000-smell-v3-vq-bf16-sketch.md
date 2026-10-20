@@ -1,5 +1,8 @@
 # Ailog 261020-155000 — SMELL-v3：VQ sketch 增加 bf16 传输口径；停 0.25，改跑 0.5 bf16
 
+> **口径已被 `261020-162000` 取代**：本文的 0.5 bf16 仍是旧 total 口径（`c_dim=rate*d/C`），
+> r0 后已停；新架构为 per-result `c_dim=rate*d`。bf16 传输本身继续沿用。
+
 > 承接 `261020-103040`（VQ 初版，fp32 sketch）。用户指出：`--vq-rate 0.5` 在 fp32 sketch (4B) vs
 > dense bf16 (2B) 下 `vq_ratio_bytes=1.0`，并不是真正的字节压缩。本 session 加 `--vq-sketch-dtype`，
 > 默认 bf16（内部 fp32 累加、传输前 cast），停掉 0.25 run，改跑 0.5 bf16。

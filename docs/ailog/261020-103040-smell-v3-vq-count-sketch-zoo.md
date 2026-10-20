@@ -1,5 +1,8 @@
 # Ailog 261020-103040 — SMELL-v3：VQ/Count Sketch 接入 ZOO 上行（`--vq-rate`，默认关闭）
 
+> **口径已被 `261020-162000` 取代**：本文的 rate=总预算（`C*c_dim/d`）；新架构为 per-result
+> `c_dim=rate*d`（每条训练结果都上传）。旧的 0.25/0.5 长跑已停，partial 存档。
+
 > 用户指令：把 `third_party/VQ` 的量化压缩加入训练，设计压缩率 CLI（默认 1 = 不开）；
 > 压缩率按“总 sketch 元素 / 活跃参数”定义；channel 数 = 一轮 ZOO 前向样本数（`local_steps * zo_directions`）；
 > 开工前先定 clip 语义。分支：`exp/vq-compression`（从 `exp/distilbert-16k`/本地 `main` `37e5708` 拉出）。

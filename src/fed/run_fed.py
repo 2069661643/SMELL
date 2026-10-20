@@ -67,7 +67,7 @@ def parse_args():
                         help="per-client delta L2 norm clip before aggregation; <=0 disables")
     # SMELL 3 run_fed vq ADD — Count Sketch 上行压缩：rate=总 sketch 元素/活跃参数；1=关闭
     parser.add_argument("--vq-rate", type=float, default=1.0,
-                        help="Count Sketch total elements / active params; 1.0 = off; 0<rate<1 enables (ZOO only)")
+                        help="per-result sketch elements / dense params (c_dim=rate*d); 1.0 = off; 0<rate<1 enables (ZOO only)")
     parser.add_argument("--vq-rescale", choices=("on", "off"), default="on",
                         help="rescale decompressed client delta to its post-clip L2 norm")
     parser.add_argument("--vq-channels", type=int, default=0,
@@ -878,14 +878,15 @@ def main():
         vq_channels = 0
         vq_c_dim = 0
         vq_actual_rate = 1.0
+        vq_total_rate = 1.0
         vq = None
         if vq_enabled:
             vq_channels = resolve_vq_channels(args)
-            vq_c_dim = max(1, int(args.vq_rate * comm_params / vq_channels))
-            vq_actual_rate = vq_channels * vq_c_dim / float(comm_params)
-            if vq_actual_rate > 1.0 + 1e-9:
-                print(f"[fed] WARN vq actual rate {vq_actual_rate:.4f} > 1 "
-                      f"(channels={vq_channels} c_dim={vq_c_dim} active_dim={comm_params})")
+            # SMELL 3 run_fed vq_per_result MODIFIED — 每条训练结果单独上传：c_dim=rate*dense，
+            # 不再除以 channel 数；总 sketch = C*c_dim（相对单条 dense delta 是 C*rate 倍）。
+            vq_c_dim = max(1, int(args.vq_rate * comm_params))
+            vq_actual_rate = vq_c_dim / float(comm_params)
+            vq_total_rate = vq_channels * vq_c_dim / float(comm_params)
             vq = CountSketch(comm_params, vq_channels, vq_c_dim,
                              seed=(args.vq_seed if args.vq_seed is not None else args.seed),
                              device=model.device)
@@ -896,6 +897,7 @@ def main():
                     "channels": vq_channels,
                     "c_dim": vq_c_dim,
                     "actual_rate": vq_actual_rate,
+                    "total_ratio_elements": vq_total_rate,
                     "sketch_dtype": args.vq_sketch_dtype,
                     "bytes_per_element": resolve_vq_bytes_per_element(args),
                     "seed": args.vq_seed if args.vq_seed is not None else args.seed,
@@ -905,8 +907,9 @@ def main():
                 (out_dir / "vq_seeds.json").write_text(
                     json.dumps(seed_payload, indent=2), encoding="utf-8")
             print(f"[fed] vq round {round_idx} rate={args.vq_rate} channels={vq_channels} "
-                  f"c_dim={vq_c_dim} active_dim={comm_params} actual={vq_actual_rate:.6f} "
-                  f"sketch={args.vq_sketch_dtype} bytes/elem={resolve_vq_bytes_per_element(args)}")
+                  f"c_dim={vq_c_dim} active_dim={comm_params} per_result={vq_actual_rate:.6f} "
+                  f"total_ratio={vq_total_rate:.4f} sketch={args.vq_sketch_dtype} "
+                  f"bytes/elem={resolve_vq_bytes_per_element(args)}")
         # SMELL 3 run_fed vq END
         # SMELL 3 run_fed catv round start ADD — 注入上一轮掩码；回调由 ClientRunner 自行安装/移除
         base_config.consensus_mask = consensus_mask
@@ -1031,13 +1034,22 @@ def main():
         # SMELL 3 run_fed vq ADD — 本轮压缩诊断/通信量（communication_bytes 仍保留 dense 口径）
         vq_cos_values = [stats["vq_cos"] for stats in client_stats.values()
                          if stats.get("vq_cos") is not None]
+        vq_bytes_per_element = resolve_vq_bytes_per_element(args)
         vq_communication_bytes = (
-            len(client_names) * vq_channels * vq_c_dim * resolve_vq_bytes_per_element(args)
+            len(client_names) * vq_channels * vq_c_dim * vq_bytes_per_element
             if vq_enabled else 0)
-        vq_ratio_elements = (vq_channels * vq_c_dim / float(comm_params)) if vq_enabled else None
+        dense_all_results_communication_bytes = (
+            len(client_names) * vq_channels * comm_params * bytes_per_param
+            if vq_enabled else 0)
+        # 每条训练结果单独压缩：ratio_elements/ratio_bytes 是单条口径；
+        # total_* 是相对“只发一条 dense delta”的总量（= C × 单条）。
+        vq_ratio_elements = (vq_c_dim / float(comm_params)) if vq_enabled else None
+        vq_total_ratio_elements = (vq_channels * vq_ratio_elements) if vq_enabled else None
         vq_ratio_bytes = (
-            vq_communication_bytes / float(len(client_names) * comm_params * bytes_per_param)
+            vq_c_dim * vq_bytes_per_element / float(comm_params * bytes_per_param)
             if vq_enabled else None)
+        vq_total_ratio_bytes_vs_one_delta = (
+            vq_channels * vq_ratio_bytes if vq_enabled else None)
         record = {
             "event": "round",
             "round": round_idx,
@@ -1072,8 +1084,11 @@ def main():
             "vq_cos_min": min(vq_cos_values) if vq_cos_values else None,
             "vq_cos_max": max(vq_cos_values) if vq_cos_values else None,
             "vq_communication_bytes": vq_communication_bytes,
+            "dense_all_results_communication_bytes": dense_all_results_communication_bytes,
             "vq_ratio_elements": vq_ratio_elements,
+            "vq_total_ratio_elements": vq_total_ratio_elements,
             "vq_ratio_bytes": vq_ratio_bytes,
+            "vq_total_ratio_bytes_vs_one_delta": vq_total_ratio_bytes_vs_one_delta,
             "weight": args.weight,
             "lr": args.lr,
             "local_steps": args.local_steps,
@@ -1133,9 +1148,9 @@ def main():
               # SMELL 3 run_fed zo_layer_rotate ADD — 打印本轮激活层（rotate 核对用）
               f"active_layers={round_active_layers}")
         if vq_enabled:
-            print(f"[fed] vq round {round_idx} ratio={vq_ratio_elements:.4f} "
-                  f"actual={vq_actual_rate:.4f} cos_mean={record['vq_cos_mean']:.4f} "
-                  f"bytes={vq_communication_bytes}")
+            print(f"[fed] vq round {round_idx} per_result_ratio={vq_ratio_elements:.4f} "
+                  f"total_ratio={vq_total_ratio_elements:.3f} cos_mean={record['vq_cos_mean']:.4f} "
+                  f"vq_bytes={vq_communication_bytes} dense_all={dense_all_results_communication_bytes}")
 
         # SMELL 3 run_fed save_every ADD — 每 N 轮存 adapter（秒级），与 eval（分钟级）解耦
         save_due = args.save_every > 0 and (round_idx + 1) % args.save_every == 0
