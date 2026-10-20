@@ -41,7 +41,7 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 |---|---|---|---|
 | OPT r30 fixed | k=24、D=32、L=2、c=30、r=30、LoRA r1/α2、lr=0.30、clip=13.34、`--doc-order cycle` | full r29 31.46–31.70 vs fresh 33.665（+5.9~6.6%）；answer r29 2292–2474；CATV a03 answer −0.093 nats（p=5e-8），a01 n.s.；CATV full 略差 | `checkpoints/opt_ablation_r30_fixed/` |
 | BERT r30 fixed | 6 层、L=8、D=8、lr=1.4e-3、clip=1.0、cycle、eval 500 | NLL r0 1.69–1.75 → r29 **1.548–1.589**；CATV on vs off 显著（a01 p=0.030 / a03 p=0.0025） | `checkpoints/distilbert_ablation_r30_fixed/` |
-| VQ | ZOO-only、`--vq-rate` 默认 1（off）、sketch 默认 bf16 | 0.25 fp32 部分 r0–r20：NLL 1.6922→1.6692；r20 比无 VQ 基线差 +0.0417（已停）；0.5 bf16 r30 启动（261020 15:48） | `checkpoints/distilbert_vq025_a03_r20_partial/`；`logs/fed/bert_vq050_bf16_a03/` |
+| VQ | ZOO-only、`--vq-rate` 默认 1（off）、sketch 默认 bf16 | 0.25 fp32 部分 r0–r20：NLL 1.6922→1.6692；r20 比无 VQ 基线差 +0.0417（已停）；0.5 bf16 r30 运行中（r0 NLL 1.6917，cos 0.5698，ratio_bytes 0.5） | `checkpoints/distilbert_vq025_a03_r20_partial/`；`logs/fed/bert_vq050_bf16_a03/` |
 
 关键口径 caveat：
 

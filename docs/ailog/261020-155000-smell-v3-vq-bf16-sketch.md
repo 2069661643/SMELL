@@ -46,6 +46,9 @@
 - VQ：`rate=0.5`、C=64、c_dim=288、`actual=0.5`、`sketch=bf16`、`bytes/elem=2`。
 - 预期：`vq_ratio_elements=0.5`、`vq_ratio_bytes=0.5`（真正 2× 字节压缩）、cos≈0.57。
 - 首轮 smoke（2 clients/2 samples）已验证 bf16 路径：cos 0.6302，bytes 589,824 vs dense 1,179,648（0.5）。
+- **r0 实测（16:02）**：`vq_cos_mean=0.5698`（理论 0.577）；`vq_ratio_elements=0.5`；`vq_ratio_bytes=0.5`；
+  `vq_communication_bytes=1,105,920` vs dense `2,211,840`；eval **NLL 1.6917 / acc 0.424**（无 VQ 基线 r0 1.6906/0.426）；
+  训练 772.8s，与 baseline 持平。
 
 ## 五、CLI
 
@@ -65,6 +68,7 @@
 | 15:48 | 启动 | `bert_vq050_bf16_a03` | r30、CATV off、rate 0.5 bf16 |
 | 15:49 | 修改 | `AGENTS.md` | VQ 通信口径/默认 bf16/0.25 结果 |
 | 15:49 | 新增 | 本 ailog | bf16 口径 + 0.25 partial + 0.5 启动 |
+| 16:02 | 验证 | 0.5 bf16 r0 | cos 0.5698；ratio_bytes 0.5；NLL 1.6917 |
 
 ## 七、待办
 
