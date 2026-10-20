@@ -41,7 +41,7 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 |---|---|---|---|
 | OPT r30 fixed | k=24、D=32、L=2、c=30、r=30、LoRA r1/α2、lr=0.30、clip=13.34、`--doc-order cycle` | full r29 31.46–31.70 vs fresh 33.665（+5.9~6.6%）；answer r29 2292–2474；CATV a03 answer −0.093 nats（p=5e-8），a01 n.s.；CATV full 略差 | `checkpoints/opt_ablation_r30_fixed/` |
 | BERT r30 fixed | 6 层、L=8、D=8、lr=1.4e-3、clip=1.0、cycle、eval 500 | NLL r0 1.69–1.75 → r29 **1.548–1.589**；CATV on vs off 显著（a01 p=0.030 / a03 p=0.0025） | `checkpoints/distilbert_ablation_r30_fixed/` |
-| VQ | ZOO-only、`--vq-rate` 默认 1（off） | smoke 已过；rate 0.5/0.25/0.1 的 cos≈0.63/0.48/0.31；**尚无长跑** | `temp/smoke_vq_*`（gitignore） |
+| VQ | ZOO-only、`--vq-rate` 默认 1（off）、sketch 默认 bf16 | 0.25 fp32 部分 r0–r20：NLL 1.6922→1.6692；r20 比无 VQ 基线差 +0.0417（已停）；0.5 bf16 r30 启动（261020 15:48） | `checkpoints/distilbert_vq025_a03_r20_partial/`；`logs/fed/bert_vq050_bf16_a03/` |
 
 关键口径 caveat：
 
@@ -84,13 +84,14 @@ $PY src/fed/run_fed.py --arch opt --tag a01 --gpu 2 \
 ## VQ（Count Sketch）上行压缩
 
 - 入口：`src/compress/count_sketch.py`；`--vq-rate` 默认 **1.0 = 关闭**，`0<rate<1` 开启。**仅 ZOO**；`--trainer bp --vq-rate<1` 直接报错。
+- `--vq-sketch-dtype {bf16,fp32}` 默认 **bf16**（内部 bucket 累加仍 fp32，传输前 cast）；`--vq-bytes-per-element 0` = auto（bf16=2B，fp32=4B）。
 - **rate 口径 = 总 sketch 元素 / 活跃可训练参数**（与 `third_party/VQ/script.py` 一致），不是 per-channel。
 - **channel 数 C = `local_steps * zo_directions`**（每个中心差分方向样本 1 channel；`--vq-channels` 仅诊断覆盖）。`c_dim = max(1, floor(rate * d_active / C))`；实际 `vq_actual_rate = C*c_dim/d_active` 写入 metrics。
 - **每个 channel 独立 hash/sign seed，所有 client 共享同一 seed 序列**（`--vq-seed` 默认 `--seed`）；`vq_seeds.json` 落盘。不要改成 C 个 channel 完全同 hash：那会退化成一个 `c_dim` sketch，cos≈√(rate/C)。
 - **clip 顺序：先按现有 `--delta-clip` 对完整 delta 做全局 L2 clip，再 VQ**；server 解压后默认 `--vq-rescale on` 缩放到 clip 后范数。`delta_norm` 仍是完整 delta 口径；方向误差看 `vq_cos_mean`。
-- **fidelity**：Count Sketch 在总预算 N=rate*d 时 cos≈√(rate/(1+rate))，不是 √rate。实测（BERT d=294912、C=4）：rate 0.5→0.630、0.25→0.484、0.1→0.310；OPT d=65536、C=2、rate 0.1→0.299。rate=1 直接绕过 VQ，基线逐位不变（已验证）。**长跑建议先 0.5/0.25；0.1 的方向误差大，先跑 1 轮看 loss/`delta_norm` 再决定。**
-- **通信口径**：`vq_communication_bytes = clients * C * c_dim * 4`（fp32 sketch）；`communication_bytes` 保留 dense bf16 口径。注意 fp32 sketch 4B vs dense 2B ⇒ `--vq-rate 0.5` 的 `vq_ratio_bytes` = 1.0；要真实字节压缩需 bf16 sketch（暂未实现，先看 `vq_ratio_elements`）。
-- metrics/config 字段：`vq_rate/vq_channels/vq_c_dim/vq_active_dim/vq_actual_rate/vq_cos_mean|min|max/vq_communication_bytes/vq_ratio_elements/vq_ratio_bytes`；`config.json` 记录 `vq_seed/vq_bytes_per_element`。
+- **fidelity**：Count Sketch 在总预算 N=rate*d 时 cos≈√(rate/(1+rate))，不是 √rate。实测（BERT d=294912、C=4）：rate 0.5→0.630、0.25→0.484、0.1→0.310；OPT d=65536、C=2、rate 0.1→0.299。rate=1 直接绕过 VQ，基线逐位不变（已验证）。**0.25 fp32 部分 run 已显示明显落后基线（r20 +0.0417 NLL）；0.5 bf16 正在验证。0.1 的方向误差大，先跑 1 轮再决定。**
+- **通信口径**：`vq_communication_bytes = clients * C * c_dim * bytes_per_element`；`communication_bytes` 保留 dense bf16 口径。默认 bf16 sketch（2B）⇒ `vq_ratio_bytes = vq_ratio_elements`（0.5→0.5=2×，0.25→0.25=4×）；`--vq-sketch-dtype fp32`（4B）时 0.5→1.0（不省字节）。实测 bf16 cast 对 cos 影响 <1e-4（真实 a03 adapter，见 ailog `261020-155000`）。
+- metrics/config 字段：`vq_rate/vq_channels/vq_c_dim/vq_active_dim/vq_actual_rate/vq_sketch_dtype/vq_bytes_per_element/vq_cos_mean|min|max/vq_communication_bytes/vq_ratio_elements/vq_ratio_bytes`；`config.json` 记录 `vq_seed/vq_sketch_dtype/vq_bytes_per_element`。
 - 自检：`$PY src/compress/count_sketch.py`；smoke：
 
 ```bash
@@ -103,7 +104,7 @@ $PY src/fed/run_fed.py --arch distilbert --tag a01 --gpu 0 --trainer zoo \
   --zo-subspace layers --zo-layers 0-5 --zo-directions 2 --local-steps 2 \
   --rounds 1 --lr 1.4e-3 --delta-clip 1.0 --max-clients 2 --max-train-samples 2 \
   --truncate 2048 --eval-every 0 --save-every 0 \
-  --vq-rate 0.5 --out-root temp/smoke_vq_bert
+  --vq-rate 0.5 --vq-sketch-dtype bf16 --out-root temp/smoke_vq_bert
 ```
 
 ## 硬坑（ZOO / 精度 / 数据）
