@@ -65,6 +65,17 @@ def parse_args():
     # SMELL 3 run_fed delta_clip ADD — 逐 client delta 全局 L2 范数裁剪（防重尾离群 client 毒化 FedAvg；0=off）
     parser.add_argument("--delta-clip", type=float, default=1.0,
                         help="per-client delta L2 norm clip before aggregation; <=0 disables")
+    # SMELL 3 run_fed vq ADD — Count Sketch 上行压缩：rate=总 sketch 元素/活跃参数；1=关闭
+    parser.add_argument("--vq-rate", type=float, default=1.0,
+                        help="Count Sketch total elements / active params; 1.0 = off; 0<rate<1 enables (ZOO only)")
+    parser.add_argument("--vq-rescale", choices=("on", "off"), default="on",
+                        help="rescale decompressed client delta to its post-clip L2 norm")
+    parser.add_argument("--vq-channels", type=int, default=0,
+                        help="override channel count; 0 = local_steps * zo_directions (ZOO)")
+    parser.add_argument("--vq-seed", type=int, default=None,
+                        help="hash/sign seed base; default = --seed (shared by all clients)")
+    parser.add_argument("--vq-bytes-per-element", type=int, default=4,
+                        help="bytes per sketch element for communication accounting (fp32=4)")
     # SMELL 3 run_fed rank_rotation ADD — LoRA 秩调度：all=旧行为；rotate=每轮激活 rank_k 个秩轮换；lock=固定前 rank_k 秩
     parser.add_argument("--rank-mode", choices=("all", "rotate", "lock"), default="all")
     parser.add_argument("--rank-k", type=int, default=1, help="每轮激活秩数（>0；rotate/lock 生效）")
@@ -294,6 +305,48 @@ def delta_norm(delta):
     return float(sum(torch.sum(tensor.float() ** 2) for tensor in delta.values()) ** 0.5)
 
 
+# SMELL 3 run_fed vq BEGIN — delta dict <-> active 子空间 flat（Count Sketch 接线）
+def flatten_delta(delta, active_index=None):
+    """按参数名排序拼 flat；active_index 非 None 时只取激活子空间。"""
+    import torch
+    names = sorted(delta)
+    assert names, "delta is empty"
+    flat = torch.cat([delta[name].detach().reshape(-1).float() for name in names])
+    if active_index is not None:
+        flat = flat[active_index.to(device=flat.device)]
+    return names, flat
+
+
+def scatter_delta(flat, template, active_index=None):
+    """把 active flat 散射回与 template 同 key/shape/dtype 的 dict；非激活位置为 0。"""
+    import torch
+    names = sorted(template)
+    total = sum(int(template[name].numel()) for name in names)
+    flat = flat.detach().reshape(-1)
+    if active_index is not None:
+        full = torch.zeros(total, dtype=flat.dtype, device=flat.device)
+        full[active_index.to(device=flat.device)] = flat
+        flat = full
+    assert flat.numel() == total, f"flat has {flat.numel()} elements, expected {total}"
+    out = {}
+    offset = 0
+    for name in names:
+        source = template[name]
+        numel = int(source.numel())
+        out[name] = flat[offset : offset + numel].reshape(source.shape).to(
+            device=source.device, dtype=source.dtype)
+        offset += numel
+    return out
+
+
+def resolve_vq_channels(args):
+    """ZOO 的 channel 数：每个中心差分方向样本 1 channel（C=local_steps*zo_directions）。"""
+    if int(args.vq_channels) > 0:
+        return int(args.vq_channels)
+    return int(args.local_steps) * int(args.zo_directions)
+# SMELL 3 run_fed vq END
+
+
 # SMELL 3 run_fed per_module_delta BEGIN — 逐层/逐投影拆分 client δ 的 L2 范数（诊断 LoRA 更新分布）
 # SMELL 3 run_fed arch MODIFIED — 模式兼容 OPT（layers.N.self_attn.q_proj）与 DistilBERT（layer.N.attention.q_lin）
 _LAYER_PATTERN = re.compile(r"(?:layers|layer)\.(\d+)\.")
@@ -496,6 +549,23 @@ def main():
         raise SystemExit(f"--rank-k must be > 0, got {args.rank_k}")
     if args.delta_clip < 0:
         raise SystemExit(f"--delta-clip must be >= 0, got {args.delta_clip}")
+    # SMELL 3 run_fed vq BEGIN — VQ 参数校验（仅 ZOO；rate=1 完全关闭）
+    if not (0.0 < args.vq_rate <= 1.0):
+        raise SystemExit(f"--vq-rate must be in (0, 1], got {args.vq_rate}")
+    if args.vq_channels < 0:
+        raise SystemExit(f"--vq-channels must be >= 0, got {args.vq_channels}")
+    if args.vq_bytes_per_element <= 0:
+        raise SystemExit(f"--vq-bytes-per-element must be > 0, got {args.vq_bytes_per_element}")
+    if args.vq_rate < 1.0:
+        if args.trainer != "zoo":
+            raise SystemExit("--vq-rate < 1 is ZOO-only (channels = local_steps * zo_directions)")
+        if args.local_steps <= 0:
+            raise SystemExit(f"--vq-rate < 1 requires --local-steps > 0, got {args.local_steps}")
+        if args.zo_directions <= 0:
+            raise SystemExit(f"--vq-rate < 1 requires --zo-directions > 0, got {args.zo_directions}")
+        if resolve_vq_channels(args) <= 0:
+            raise SystemExit("--vq-rate < 1 resolved 0 channels; check --local-steps/--zo-directions")
+    # SMELL 3 run_fed vq END
     # SMELL 3 run_fed subspace_zo BEGIN — 子空间 ZO 参数校验、与秩轮换互斥、解析选择串
     if args.zo_subspace != "all" and args.rank_mode != "all":
         raise SystemExit(
@@ -522,6 +592,9 @@ def main():
     # SMELL 3 run_fed subspace_zo END
 
     import torch
+    # SMELL 3 run_fed vq ADD — 仅在开启时导入，保持 --help/CPU 路径轻量
+    if args.vq_rate < 1.0:
+        from src.compress.count_sketch import CountSketch
     # SMELL 3 run_fed imports MODIFIED — 使用 src/ 可编辑的 OPT 拷贝（含 CATV 掩码注入）；distilbert 分支按需导入
     if args.arch == "opt":
         from src.models.modeling_opt_smell import OPTForCausalLM
@@ -747,6 +820,12 @@ def main():
         "resolved_pruned_config": str(resolve(args.pruned_config)) if args.pruned_config else None,
         "predictor_loaded_tensors": predictor_loaded,
         "predictor_zero_filled_tensors": predictor_zero_filled,
+        # SMELL 3 run_fed vq ADD — 上行压缩参数（rate=1 时 channels/c_dim 不生效）
+        "vq_rate": args.vq_rate,
+        "vq_channels": resolve_vq_channels(args) if args.vq_rate < 1.0 else None,
+        "vq_rescale": args.vq_rescale,
+        "vq_seed": args.vq_seed if args.vq_seed is not None else args.seed,
+        "vq_bytes_per_element": args.vq_bytes_per_element,
         "torch_version": torch.__version__,
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
     }
@@ -784,6 +863,38 @@ def main():
         # SMELL 3 run_fed zo_layer_rotate END
         comm_params = int(active_index.numel()) if active_index is not None else trainable_params
         # SMELL 3 run_fed rank_rotation END
+        # SMELL 3 run_fed vq BEGIN — 每轮重建 compressor（active 子空间尺寸可能随层轮转变化）
+        vq_enabled = args.vq_rate < 1.0
+        vq_channels = 0
+        vq_c_dim = 0
+        vq_actual_rate = 1.0
+        vq = None
+        if vq_enabled:
+            vq_channels = resolve_vq_channels(args)
+            vq_c_dim = max(1, int(args.vq_rate * comm_params / vq_channels))
+            vq_actual_rate = vq_channels * vq_c_dim / float(comm_params)
+            if vq_actual_rate > 1.0 + 1e-9:
+                print(f"[fed] WARN vq actual rate {vq_actual_rate:.4f} > 1 "
+                      f"(channels={vq_channels} c_dim={vq_c_dim} active_dim={comm_params})")
+            vq = CountSketch(comm_params, vq_channels, vq_c_dim,
+                             seed=(args.vq_seed if args.vq_seed is not None else args.seed),
+                             device=model.device)
+            if round_idx == 0:
+                seed_payload = {
+                    "round": round_idx,
+                    "active_dim": comm_params,
+                    "channels": vq_channels,
+                    "c_dim": vq_c_dim,
+                    "actual_rate": vq_actual_rate,
+                    "seed": args.vq_seed if args.vq_seed is not None else args.seed,
+                    "hash_seeds": vq.hash_seeds,
+                    "sigma_seeds": vq.sigma_seeds,
+                }
+                (out_dir / "vq_seeds.json").write_text(
+                    json.dumps(seed_payload, indent=2), encoding="utf-8")
+            print(f"[fed] vq round {round_idx} rate={args.vq_rate} channels={vq_channels} "
+                  f"c_dim={vq_c_dim} active_dim={comm_params} actual={vq_actual_rate:.6f}")
+        # SMELL 3 run_fed vq END
         # SMELL 3 run_fed catv round start ADD — 注入上一轮掩码；回调由 ClientRunner 自行安装/移除
         base_config.consensus_mask = consensus_mask
         base_config.vote_callback = None
@@ -827,6 +938,25 @@ def main():
                 client_delta = {key: value * scale for key, value in client_delta.items()}
                 delta_clipped = True
             # SMELL 3 run_fed delta_clip END
+            # SMELL 3 run_fed vq BEGIN — clip 后对 active 子空间做 Count Sketch，server 只解压不回传
+            vq_cos = None
+            vq_delta_norm = None
+            vq_client_bytes = 0
+            if vq_enabled:
+                _, flat = flatten_delta(client_delta, active_index)
+                flat = flat.to(device=model.device, dtype=torch.float32)
+                target_norm = float(flat.norm())
+                sketch = vq.compress(flat)
+                flat_hat = vq.decompress(sketch)
+                vq_cos = CountSketch.cosine(flat, flat_hat)
+                if args.vq_rescale == "on" and target_norm > 0.0:
+                    hat_norm = float(flat_hat.norm())
+                    if hat_norm > 0.0:
+                        flat_hat = flat_hat * (target_norm / hat_norm)
+                client_delta = scatter_delta(flat_hat.cpu(), client_delta, active_index)
+                vq_delta_norm = delta_norm(client_delta)
+                vq_client_bytes = vq.sketch_bytes(args.vq_bytes_per_element)
+            # SMELL 3 run_fed vq END
             deltas.append(client_delta)
             counts.append(num_samples)
             losses.append(result["train_loss"])
@@ -840,6 +970,10 @@ def main():
                 "delta_clip_applied": delta_clipped,
                 "delta_norm_by_layer": delta_by_layer,
                 "delta_norm_by_module": delta_by_module,
+                # SMELL 3 run_fed vq ADD — 每 client 压缩诊断（cos 为 rescale 前后不变的方向误差）
+                "vq_cos": vq_cos,
+                "vq_delta_norm": vq_delta_norm,
+                "vq_client_bytes": vq_client_bytes,
                 # SMELL 3 run_fed doc_order ADD — 本轮该 client 的起始行（cycle 复现/核对用）
                 "round_start": round_start,
             }
@@ -878,6 +1012,16 @@ def main():
             / len(client_stats)
             for key in layer_keys
         }
+        # SMELL 3 run_fed vq ADD — 本轮压缩诊断/通信量（communication_bytes 仍保留 dense 口径）
+        vq_cos_values = [stats["vq_cos"] for stats in client_stats.values()
+                         if stats.get("vq_cos") is not None]
+        vq_communication_bytes = (
+            len(client_names) * vq_channels * vq_c_dim * args.vq_bytes_per_element
+            if vq_enabled else 0)
+        vq_ratio_elements = (vq_channels * vq_c_dim / float(comm_params)) if vq_enabled else None
+        vq_ratio_bytes = (
+            vq_communication_bytes / float(len(client_names) * comm_params * bytes_per_param)
+            if vq_enabled else None)
         record = {
             "event": "round",
             "round": round_idx,
@@ -897,6 +1041,21 @@ def main():
             "cos_mean_sampled": sample_pairwise_cos(deltas),
             # SMELL 3 run_fed rank_rotation MODIFIED — 有掩码时通信量只计激活子空间
             "communication_bytes": len(client_names) * comm_params * bytes_per_param,
+            # SMELL 3 run_fed vq ADD — Count Sketch 压缩口径（rate=1 时字段为 None/0）
+            "vq_enabled": vq_enabled,
+            "vq_rate": args.vq_rate,
+            "vq_channels": vq_channels if vq_enabled else None,
+            "vq_c_dim": vq_c_dim if vq_enabled else None,
+            "vq_active_dim": comm_params if vq_enabled else None,
+            "vq_actual_rate": vq_actual_rate if vq_enabled else None,
+            "vq_rescale": args.vq_rescale,
+            "vq_seed": args.vq_seed if args.vq_seed is not None else args.seed,
+            "vq_cos_mean": (sum(vq_cos_values) / len(vq_cos_values)) if vq_cos_values else None,
+            "vq_cos_min": min(vq_cos_values) if vq_cos_values else None,
+            "vq_cos_max": max(vq_cos_values) if vq_cos_values else None,
+            "vq_communication_bytes": vq_communication_bytes,
+            "vq_ratio_elements": vq_ratio_elements,
+            "vq_ratio_bytes": vq_ratio_bytes,
             "weight": args.weight,
             "lr": args.lr,
             "local_steps": args.local_steps,
@@ -955,6 +1114,10 @@ def main():
               f"active_ranks={active_ranks} comm_bytes={record['communication_bytes']} "
               # SMELL 3 run_fed zo_layer_rotate ADD — 打印本轮激活层（rotate 核对用）
               f"active_layers={round_active_layers}")
+        if vq_enabled:
+            print(f"[fed] vq round {round_idx} ratio={vq_ratio_elements:.4f} "
+                  f"actual={vq_actual_rate:.4f} cos_mean={record['vq_cos_mean']:.4f} "
+                  f"bytes={vq_communication_bytes}")
 
         # SMELL 3 run_fed save_every ADD — 每 N 轮存 adapter（秒级），与 eval（分钟级）解耦
         save_due = args.save_every > 0 and (round_idx + 1) % args.save_every == 0
