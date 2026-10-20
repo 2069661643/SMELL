@@ -74,8 +74,10 @@ def parse_args():
                         help="override channel count; 0 = local_steps * zo_directions (ZOO)")
     parser.add_argument("--vq-seed", type=int, default=None,
                         help="hash/sign seed base; default = --seed (shared by all clients)")
-    parser.add_argument("--vq-bytes-per-element", type=int, default=4,
-                        help="bytes per sketch element for communication accounting (fp32=4)")
+    parser.add_argument("--vq-sketch-dtype", choices=("bf16", "fp32"), default="bf16",
+                        help="sketch transmission dtype; accumulation is fp32, cast before decompress")
+    parser.add_argument("--vq-bytes-per-element", type=int, default=0,
+                        help="bytes per sketch element for accounting; 0 = auto (bf16=2, fp32=4)")
     # SMELL 3 run_fed rank_rotation ADD — LoRA 秩调度：all=旧行为；rotate=每轮激活 rank_k 个秩轮换；lock=固定前 rank_k 秩
     parser.add_argument("--rank-mode", choices=("all", "rotate", "lock"), default="all")
     parser.add_argument("--rank-k", type=int, default=1, help="每轮激活秩数（>0；rotate/lock 生效）")
@@ -344,6 +346,13 @@ def resolve_vq_channels(args):
     if int(args.vq_channels) > 0:
         return int(args.vq_channels)
     return int(args.local_steps) * int(args.zo_directions)
+
+
+def resolve_vq_bytes_per_element(args):
+    """sketch 传输字节宽度：显式 >0 覆盖；0=auto（bf16=2，fp32=4）。"""
+    if int(args.vq_bytes_per_element) > 0:
+        return int(args.vq_bytes_per_element)
+    return 2 if args.vq_sketch_dtype == "bf16" else 4
 # SMELL 3 run_fed vq END
 
 
@@ -554,8 +563,8 @@ def main():
         raise SystemExit(f"--vq-rate must be in (0, 1], got {args.vq_rate}")
     if args.vq_channels < 0:
         raise SystemExit(f"--vq-channels must be >= 0, got {args.vq_channels}")
-    if args.vq_bytes_per_element <= 0:
-        raise SystemExit(f"--vq-bytes-per-element must be > 0, got {args.vq_bytes_per_element}")
+    if args.vq_bytes_per_element < 0:
+        raise SystemExit(f"--vq-bytes-per-element must be >= 0 (0=auto), got {args.vq_bytes_per_element}")
     if args.vq_rate < 1.0:
         if args.trainer != "zoo":
             raise SystemExit("--vq-rate < 1 is ZOO-only (channels = local_steps * zo_directions)")
@@ -824,8 +833,9 @@ def main():
         "vq_rate": args.vq_rate,
         "vq_channels": resolve_vq_channels(args) if args.vq_rate < 1.0 else None,
         "vq_rescale": args.vq_rescale,
+        "vq_sketch_dtype": args.vq_sketch_dtype,
         "vq_seed": args.vq_seed if args.vq_seed is not None else args.seed,
-        "vq_bytes_per_element": args.vq_bytes_per_element,
+        "vq_bytes_per_element": resolve_vq_bytes_per_element(args),
         "torch_version": torch.__version__,
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
     }
@@ -886,6 +896,8 @@ def main():
                     "channels": vq_channels,
                     "c_dim": vq_c_dim,
                     "actual_rate": vq_actual_rate,
+                    "sketch_dtype": args.vq_sketch_dtype,
+                    "bytes_per_element": resolve_vq_bytes_per_element(args),
                     "seed": args.vq_seed if args.vq_seed is not None else args.seed,
                     "hash_seeds": vq.hash_seeds,
                     "sigma_seeds": vq.sigma_seeds,
@@ -893,7 +905,8 @@ def main():
                 (out_dir / "vq_seeds.json").write_text(
                     json.dumps(seed_payload, indent=2), encoding="utf-8")
             print(f"[fed] vq round {round_idx} rate={args.vq_rate} channels={vq_channels} "
-                  f"c_dim={vq_c_dim} active_dim={comm_params} actual={vq_actual_rate:.6f}")
+                  f"c_dim={vq_c_dim} active_dim={comm_params} actual={vq_actual_rate:.6f} "
+                  f"sketch={args.vq_sketch_dtype} bytes/elem={resolve_vq_bytes_per_element(args)}")
         # SMELL 3 run_fed vq END
         # SMELL 3 run_fed catv round start ADD — 注入上一轮掩码；回调由 ClientRunner 自行安装/移除
         base_config.consensus_mask = consensus_mask
@@ -947,6 +960,9 @@ def main():
                 flat = flat.to(device=model.device, dtype=torch.float32)
                 target_norm = float(flat.norm())
                 sketch = vq.compress(flat)
+                # SMELL 3 run_fed vq_bf16 ADD — 模拟上行 cast；内部 bucket 累加仍是 fp32
+                if args.vq_sketch_dtype == "bf16":
+                    sketch = sketch.to(torch.bfloat16).float()
                 flat_hat = vq.decompress(sketch)
                 vq_cos = CountSketch.cosine(flat, flat_hat)
                 if args.vq_rescale == "on" and target_norm > 0.0:
@@ -955,7 +971,7 @@ def main():
                         flat_hat = flat_hat * (target_norm / hat_norm)
                 client_delta = scatter_delta(flat_hat.cpu(), client_delta, active_index)
                 vq_delta_norm = delta_norm(client_delta)
-                vq_client_bytes = vq.sketch_bytes(args.vq_bytes_per_element)
+                vq_client_bytes = vq.sketch_bytes(resolve_vq_bytes_per_element(args))
             # SMELL 3 run_fed vq END
             deltas.append(client_delta)
             counts.append(num_samples)
@@ -1016,7 +1032,7 @@ def main():
         vq_cos_values = [stats["vq_cos"] for stats in client_stats.values()
                          if stats.get("vq_cos") is not None]
         vq_communication_bytes = (
-            len(client_names) * vq_channels * vq_c_dim * args.vq_bytes_per_element
+            len(client_names) * vq_channels * vq_c_dim * resolve_vq_bytes_per_element(args)
             if vq_enabled else 0)
         vq_ratio_elements = (vq_channels * vq_c_dim / float(comm_params)) if vq_enabled else None
         vq_ratio_bytes = (
@@ -1049,6 +1065,8 @@ def main():
             "vq_active_dim": comm_params if vq_enabled else None,
             "vq_actual_rate": vq_actual_rate if vq_enabled else None,
             "vq_rescale": args.vq_rescale,
+            "vq_sketch_dtype": args.vq_sketch_dtype if vq_enabled else None,
+            "vq_bytes_per_element": resolve_vq_bytes_per_element(args) if vq_enabled else None,
             "vq_seed": args.vq_seed if args.vq_seed is not None else args.seed,
             "vq_cos_mean": (sum(vq_cos_values) / len(vq_cos_values)) if vq_cos_values else None,
             "vq_cos_min": min(vq_cos_values) if vq_cos_values else None,
