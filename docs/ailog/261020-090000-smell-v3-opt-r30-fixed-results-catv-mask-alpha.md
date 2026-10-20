@@ -79,3 +79,29 @@ step5 predictor + pos_only；**唯一协议修复 = `--doc-order cycle`**（旧�
 | 10-20 08:5x | 归档 | `checkpoints/opt_ablation_r30_fixed/` | 4 臂 + SHA256SUMS |
 | 10-20 08:5x | 新增 | 本 ailog | 结果 + 分解 + 结论 |
 | 10-20 08:5x | 修改 | `docs/weight-manifest.md` §7 | OPT 修复版归档 sha256 + 口径 |
+
+## 八、r0 补测（261020 09:33；第 0 轮训练后）
+
+链内 eval-every 5 ⇒ 首个 in-run 点是 r4；r0（post-round-0）此前缺失。补测 `adapter_round000`（on 臂带 `consensus_mask_round0`，与 run_fed 在 r0 评测语义一致）：
+
+| 臂 | r0 full | r0 answer |
+|---|---|---|
+| fixed a01_off / old a01_off | **33.5253** | 1782.0 |
+| fixed a01_on / old a01_on | **33.9211** | 1745.0 |
+| fixed a03_off | 33.5299 | 1765.3 |
+| fixed a03_on | 33.9399 | 1598.2 |
+
+- **一致性**：fixed 与 old 的 a01_off / a01_on r0 **逐位相同**（round0 取数相同：fixed 与 cycle 的第 0 轮都从第 0 行开始；on 臂 round0 均无掩码 + 同一 mask_round0）✓。
+- **fresh（训练前）** = 33.6653/1740.6；off 臂 r0 已优于 fresh（−0.14 full）；**on 臂 r0（带 mask）比 fresh 差 0.26**（r0 掩码对 full 的即时代价）。
+- 完整 r0→r29 表（含 own-path 与 vs fresh）：`temp/table_opt_fixed_r30_ppl_with_r0.csv`。
+
+| α | condition | r0 | r4 | r9 | r14 | r19 | r24 | r29 | own% | vs fresh |
+|---|---|---|---|---|---|---|---|---|---|---|
+| a01 | off | 33.525 | 32.848 | 32.356 | 32.099 | 31.846 | 31.781 | 31.533 | +5.94 | +6.33 |
+| a01 | on-evaloff | 33.525 | 32.816 | 32.282 | 31.954 | 31.748 | 31.553 | **31.378** | +6.40 | +6.79 |
+| a01 | on-evalon | 33.921 | 33.210 | 32.619 | 32.287 | 32.049 | 31.824 | 31.635 | +6.74 | +6.03 |
+| a03 | off | 33.530 | 32.869 | 32.392 | 32.102 | 31.843 | 31.668 | 31.457 | +6.18 | +6.56 |
+| a03 | on-evaloff | 33.530 | 32.827 | 32.351 | 31.971 | 31.811 | 31.588 | **31.416** | +6.30 | +6.68 |
+| a03 | on-evalon | 33.940 | 33.238 | 32.690 | 32.296 | 32.113 | 31.877 | 31.696 | +6.61 | +5.85 |
+
+> 注：on 臂 own% 因 r0 基线含 mask 代价而偏大；跨协议比较请用 vs fresh。on-evaloff 的 r0 与 off r0 相同（同权重、无掩码）。
