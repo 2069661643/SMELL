@@ -121,3 +121,19 @@ cd <dest>/SMELLv3 && sha256sum \
 --local-steps 8 --lr 1.4e-3 --delta-clip 1.0 --lora-r 1 --lora-alpha 2 \
 --max-clients 30 --rounds 30 --catv {off,on} --eval-every 1 --eval-max-samples 500
 ```
+
+## 7. OPT-350M 修复版 r30 四臂（cycle 语料轮转；USE，261020）
+
+> 配置：k=24/D=32/L=2/c=30/r=30、LoRA r=1/α=2、lr=0.30、clip=13.34、fp32+sdpa_prune+sparse 0.4、step5 predictor+pos_only、**`--doc-order cycle`**、eval-every 5。
+> 结果/分解见 ailog `261020-090000`：full 与旧协议持平（+6.3~6.6% vs fresh 33.6653），**answer 大幅改善（−12~−16%）**；CATV 部署效应 α 依赖（a03 answer −0.093 nats，p=5e-8；a01 n.s.），且由**推理掩码**主导。
+
+`checkpoints/opt_ablation_r30_fixed/`：
+
+| 臂 | adapter sha256 | full r29 | answer r29 |
+|---|---|---|---|
+| `r30_a01_catv_off` | `792f66131ad46483582b7f13103a77f6396524cf3cf73a51450d86308093d9e5` | 31.533 | 2436.1 |
+| `r30_a01_catv_on` | `32e46b70adf1a0eb5c84d160c860fde09a3c030d61bf5b8cc5b059ea7dc7eb07` | 31.635 | 2474.4 |
+| `r30_a03_catv_off` | `e1d4acda62440c2cf529273cff418df77b5ca2a6d4e1d28ff94e420a64923b7a` | 31.457 | 2448.8 |
+| `r30_a03_catv_on` | `b3cc1cc5f875d93e9487986926c054c1c76cd2a7df7754df947fa8cc966b0c23` | 31.696 | 2291.7 |
+
+评测口径：`temp/logs/opt_r30_fixed_report.txt`（主表/配对）、`temp/logs/opt_r30_evaloff_report.txt`（权重 vs 掩码分解）；逐样本在各臂 `eval_roundNNN_persample.json` / `evaloff_roundNNN_persample.json`。
