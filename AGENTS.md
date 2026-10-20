@@ -2,9 +2,9 @@
 
 > **你的角色：SMELL-v3 实验 Agent。** 仓库有 3 类 checkout：云端 **A40×4（host `amax`）**、**AutoDL 1×RTX 4090 24G**（本 checkout：`/root/smell/SMELL`）、WSL（8GB RTX 5060，只做 ≤4k smoke）。
 > **开工先跑 `hostname` + `git branch --show-current`**：
-> - 主实验线 `exp/distilbert-16k` @ `37e5708`（261020）；`main` 已 fast-forward 到同一提交（本地）。
-> - VQ 线 `exp/vq-compression`（从 `37e5708` 拉出）；`exp/rank-rotation-lora` 是祖先/旧线。
-> - `main` 已不再是 260924 旧快照；origin/main 可能仍落后，push 前先确认。
+> - 主实验线 `exp/distilbert-16k` @ `37e5708`（261020）；`main` 已 fast-forward 到同一提交并 push 到 `origin/main`。
+> - VQ 线 `exp/vq-compression`（从 `37e5708` 拉出，已 push）；`exp/rank-rotation-lora` 是祖先/旧线。
+> - `origin/main` 与 `origin/exp/distilbert-16k` 均已同步到 `37e5708`；`main` 不再是 260924 旧快照。
 
 ## 项目与方向
 
