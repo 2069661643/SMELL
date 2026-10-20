@@ -88,7 +88,7 @@ $PY src/fed/run_fed.py --arch opt --tag a01 --gpu 2 \
 - **channel 数 C = `local_steps * zo_directions`**（每个中心差分方向样本 1 channel；`--vq-channels` 仅诊断覆盖）。`c_dim = max(1, floor(rate * d_active / C))`；实际 `vq_actual_rate = C*c_dim/d_active` 写入 metrics。
 - **每个 channel 独立 hash/sign seed，所有 client 共享同一 seed 序列**（`--vq-seed` 默认 `--seed`）；`vq_seeds.json` 落盘。不要改成 C 个 channel 完全同 hash：那会退化成一个 `c_dim` sketch，cos≈√(rate/C)。
 - **clip 顺序：先按现有 `--delta-clip` 对完整 delta 做全局 L2 clip，再 VQ**；server 解压后默认 `--vq-rescale on` 缩放到 clip 后范数。`delta_norm` 仍是完整 delta 口径；方向误差看 `vq_cos_mean`。
-- **fidelity**：Count Sketch 在总预算 N=rate*d 时 cos≈√(rate/(1+rate))，不是 √rate。实测（BERT d=294912、C=4）：rate 0.5→0.630、0.25→0.484、0.1→0.310；OPT d=65536、C=2、rate 0.1→0.299。rate=1 直接绕过 VQ，基线逐位不变（已验证）。
+- **fidelity**：Count Sketch 在总预算 N=rate*d 时 cos≈√(rate/(1+rate))，不是 √rate。实测（BERT d=294912、C=4）：rate 0.5→0.630、0.25→0.484、0.1→0.310；OPT d=65536、C=2、rate 0.1→0.299。rate=1 直接绕过 VQ，基线逐位不变（已验证）。**长跑建议先 0.5/0.25；0.1 的方向误差大，先跑 1 轮看 loss/`delta_norm` 再决定。**
 - **通信口径**：`vq_communication_bytes = clients * C * c_dim * 4`（fp32 sketch）；`communication_bytes` 保留 dense bf16 口径。注意 fp32 sketch 4B vs dense 2B ⇒ `--vq-rate 0.5` 的 `vq_ratio_bytes` = 1.0；要真实字节压缩需 bf16 sketch（暂未实现，先看 `vq_ratio_elements`）。
 - metrics/config 字段：`vq_rate/vq_channels/vq_c_dim/vq_active_dim/vq_actual_rate/vq_cos_mean|min|max/vq_communication_bytes/vq_ratio_elements/vq_ratio_bytes`；`config.json` 记录 `vq_seed/vq_bytes_per_element`。
 - 自检：`$PY src/compress/count_sketch.py`；smoke：
