@@ -137,3 +137,21 @@ cd <dest>/SMELLv3 && sha256sum \
 | `r30_a03_catv_on` | `b3cc1cc5f875d93e9487986926c054c1c76cd2a7df7754df947fa8cc966b0c23` | 31.696 | 2291.7 |
 
 评测口径：`temp/logs/opt_r30_fixed_report.txt`（主表/配对）、`temp/logs/opt_r30_evaloff_report.txt`（权重 vs 掩码分解）；逐样本在各臂 `eval_roundNNN_persample.json` / `evaloff_roundNNN_persample.json`。
+
+## 8. BERT VQ per-result r30（a03，CATV off；USE，261020）
+
+> 架构：per-result（每条 ZOO 训练结果 1 channel），`c_dim = rate*d_active`；`rate=0.5`、`C=64`、`c_dim=18,432`、bf16 sketch、rescale on、seed 0。
+> 配置：a03、CATV off、L8/D8、lr=1.4e-3、clip=1.0、cycle、r30、eval 500。
+> 结果：r0 1.690728 / acc 0.426 → r29 **1.587080 / acc 0.466**（−6.13% NLL）；同轮无 VQ a03 off = 1.588699 / 0.466，配对 ΔNLL=−0.001618（t=−2.416，p=0.0157，n=500）。
+> VQ：`vq_cos_mean` 0.9945（聚合口径）；`vq_ratio_elements=0.5`（单条）；`vq_ratio_bytes=0.5`（bf16 vs dense bf16）；`total_ratio=32`（相对一条 dense delta）。
+> 通信：per-result dense `141,557,760 B/round` vs VQ `70,778,880 B/round`（0.5）；相对“一条 delta”`2,211,840 B` 是 32×。
+
+`checkpoints/distilbert_vq050_bf16_perresult_a03_r30/`（adapter_round029 + metrics.jsonl + config.json + vq_seeds.json + SHA256SUMS）：
+
+| 文件 | sha256 |
+|---|---|
+| `adapter_round029/adapter_model.safetensors` | `71ddc9c889cd11c03f233c5a6b4a158850ef133463231ed9b20385099e581291` |
+| `adapter_round029/adapter_config.json` | `f348df57fb6bf45c23e3be21f97d7747d30c25654f5aa930fc267ec7e71aa5a2` |
+
+- 旧 total 口径的 0.25 fp32 partial：`checkpoints/distilbert_vq025_a03_r20_partial/`（仅历史，勿与新架构混比）。
+- 旧 total 口径的 0.5 bf16 partial：`checkpoints/distilbert_vq050_bf16_a03_r0_partial/`（仅历史）。

@@ -66,6 +66,10 @@
 - **r0 实测（16:29）**：`c_dim=18432`、`per_result=0.5`、`total_ratio=32`、`vq_ratio_bytes=0.5`、
   `vq_cos_mean=0.9946`、`vq_communication_bytes=70,778,880` vs `dense_all=141,557,760`；
   eval **NLL 1.6907 / acc 0.426**（无 VQ 基线 r0 1.6906/0.426）；训练 771.4s。
+- **r30 完成（23:29）**：r29 **NLL 1.587080 / acc 0.466**；同轮无 VQ a03 off = 1.588699 / 0.466；
+  逐样本配对 ΔNLL=**−0.001618**（t=−2.416，p=0.0157，n=500）。`vq_cos_mean` 全程 0.9945；
+  单轮 ~773.6s；归档 `checkpoints/distilbert_vq050_bf16_perresult_a03_r30/`（sha 见 weight-manifest §8）。
+- 通信：per-result dense 141.56MB/round vs VQ 70.78MB/round（0.5）；相对一条 dense delta 2.21MB 是 32×。
 
 ## 六、caveat
 
@@ -83,3 +87,4 @@
 | 16:20 | 修改 | `AGENTS.md` | VQ 段改 per-result |
 | 16:20 | 新增 | 本 ailog | 架构 + smoke + 旧 run 存档 |
 | 16:29 | 验证 | per-result 0.5 bf16 r0 | c_dim 18432；cos 0.9946；ratio_bytes 0.5；NLL 1.6907 |
+| 23:29 | 完成 | per-result 0.5 bf16 r30 | r29 NLL 1.5871/acc 0.466；配对 p=0.0157；归档 |

@@ -41,7 +41,7 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 |---|---|---|---|
 | OPT r30 fixed | k=24、D=32、L=2、c=30、r=30、LoRA r1/α2、lr=0.30、clip=13.34、`--doc-order cycle` | full r29 31.46–31.70 vs fresh 33.665（+5.9~6.6%）；answer r29 2292–2474；CATV a03 answer −0.093 nats（p=5e-8），a01 n.s.；CATV full 略差 | `checkpoints/opt_ablation_r30_fixed/` |
 | BERT r30 fixed | 6 层、L=8、D=8、lr=1.4e-3、clip=1.0、cycle、eval 500 | NLL r0 1.69–1.75 → r29 **1.548–1.589**；CATV on vs off 显著（a01 p=0.030 / a03 p=0.0025） | `checkpoints/distilbert_ablation_r30_fixed/` |
-| VQ | ZOO-only、per-result（`c_dim=rate*d`）、sketch 默认 bf16 | 旧 total 口径 0.25/0.5 已停（partial 存档）；新 per-result 0.5 bf16 r30 运行中（r0 cos 0.9946，NLL 1.6907，ratio_bytes 0.5） | `checkpoints/distilbert_vq025_a03_r20_partial/`；`checkpoints/distilbert_vq050_bf16_a03_r0_partial/`；`logs/fed/bert_vq050_bf16_perresult_a03/` |
+| VQ | ZOO-only、per-result（`c_dim=rate*d`）、sketch 默认 bf16 | per-result 0.5 bf16 r30 完成：NLL 1.6907→**1.5871**（−6.13%），r29 vs 无 VQ 1.5887：ΔNLL **−0.0016**（p=0.0157），acc 0.466；cos 0.9945；per-result 2×（70.8 vs 141.6 MB/round），总量 32× 一条 delta | `checkpoints/distilbert_vq050_bf16_perresult_a03_r30/`；旧 total partial：`distilbert_vq025_a03_r20_partial/`、`distilbert_vq050_bf16_a03_r0_partial/` |
 
 关键口径 caveat：
 
