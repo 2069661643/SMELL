@@ -152,6 +152,29 @@ def half_mean_var(contributions):
     return float(torch.var(torch.stack([first, second], dim=0), dim=0).mean())
 
 
+# SMELL 3 zoo var_norm NEW — var 归一化：mean((a-b)^2)/(mean(a^2)+mean(b^2)+eps)
+def half_mean_var_stats(contributions):
+    import torch
+    n = len(contributions)
+    assert n >= 2 and n % 2 == 0, f"half_mean_var_stats requires even n>=2, got {n}"
+    half = n // 2
+    first = torch.stack(contributions[:half], dim=0).mean(dim=0)
+    second = torch.stack(contributions[half:], dim=0).mean(dim=0)
+    diff = first - second
+    raw = float(torch.var(torch.stack([first, second], dim=0), dim=0).mean())
+    denom = float(first.pow(2).mean() + second.pow(2).mean())
+    norm = float(diff.pow(2).mean() / (denom + 1e-12))
+    stack = torch.stack(contributions, dim=0)
+    energy = float(stack.pow(2).mean())
+    mean_norm2 = float(stack.mean(dim=0).pow(2).mean())
+    return {
+        "var": raw,
+        "var_norm": norm,
+        "var_norm_energy": float(raw / (energy + 1e-12)),
+        "var_norm_mean": float(raw / (mean_norm2 + 1e-12)),
+    }
+
+
 def zo_grad(model, loss_fn, eps, num_directions, generator=None, index=None,
             var_threshold=0.0, var_max_directions=None, var_collect_history=False,
             var_diagnose=False, return_stats=False):

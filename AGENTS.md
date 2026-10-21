@@ -107,17 +107,17 @@ $PY src/fed/run_fed.py --arch distilbert --tag a01 --gpu 0 --trainer zoo \
   --vq-rate 0.5 --vq-sketch-dtype bf16 --out-root temp/smoke_vq_bert
 ```
 
-## VAR（per-sample）— 261021 拍板方案
+## VAR（per-sample）— 261021 Method A（raw var，min D=4）
 
-- **当前代码仍是 pool 级 VAR**（`ClientRunner._run_zoo_var_pool`：固定模型轮询 L 样本 + 采样后更新）；它只作历史/诊断，**不要当最终方案**，也不要拿它和基线做干净消融。
-- **拍板方案**：逐 sample 测 var；L=8 固定；D 低点 **2**、高点 **16**；目标 **mean D=8**（mean total samples=64）；**no patience**；逐 sample 采样后**立即更新**，再进入下一个 sample（与基线 schedule 一致）。
-- **归一化启用**：`var_norm = mean((a-b)^2)/(mean(a^2)+mean(b^2)+eps)`；**停止准则用 var_norm**，raw var 只作对照记录。
-- **数据异质不影响**：每个 sample 的 var pool 只含该 sample 自己的方向贡献，不跨 sample 混池。
-- **标定**：per-sample var(D=2,4,…,16)，30 clients × 8 samples = 240 条 history；用 var_norm 选阈值使 mean D=8；同时记录 raw/norm、hit_low(D=2)/hit_high(D=16)、D 分布。
-- **正式**：BERT a03、CATV off、VQ off、L=8、r30、eval 500；基线 a03 off = r29 NLL **1.588699 / acc 0.466**。CATV/VQ 本次均 off，不需要重测；若以后组合，D 逐 sample 变化会影响 CATV vote 权重与 VQ 的 C。
-- **风险**：D=2 时只有 1 vs 1，var 噪声大（用户已知悉）；本次先看 hit_low 多不多再决定，no patience 暂不变。标定必须报告 hit_low/high 与 D 分布；若 mean=8 不可达或方差过大，回来讨论 min D=4 / patience=2。
-- **实现责任**：本文只记录拍板方案；代码修改由后续实现 agent 执行，当前代码仍是 pool 级。
-- 详见 `docs/ailog/261021-095531-smell-v3-var-per-sample-plan-and-schedule-discussion.md`。
+- **代码已切 per-sample raw var**：`ClientRunner._run_zoo_var_per_sample`，逐 sample、L=8、D=**4..16**、no patience、逐 sample 立即更新；旧 `_run_zoo_var_pool` 只作历史诊断。
+- **停止准则 = raw var**（FwdLLM half-mean）；fork/energy 两种 `var_norm` 都只作对照记录，**不要用于停止**（fork 恒 ~1；energy ≈2/D 会抹掉 sample 区分度）。
+- **T0（r0 标定）**：30 clients × 8 samples = 240 条 history，D=4..16；选中 **0.587230920791626**：mean D=**7.967**、median 4、hit_low(D=4)=**123/240**、hit_high(D=16)=59/240。用户已选 **A**，接受这一分布。
+- **Method A 分段**：r0–r9 用 T0；r10/r20 各跑 **8 clients × 8 samples** 探针（固定 global model、不更新、cycle 当前 cursor），用 raw var 选 T10/T20（mean D≤8 最接近 8）；写 `var_probe_roundNNN.jsonl` / `var_thresholds.json`。`--var-segment-rounds 10`、`--var-probe-clients 8`。
+- **CLI**：`--var-control {on,off}` 默认 off；`--var-threshold` 默认 **0.587230920791626**（T0）；`--var-diagnose` 仅标定用。
+- **正式**：BERT a03、CATV off、VQ off、L=8、r30、eval 500；基线 a03 off r29 = **1.588699 / 0.466**。run：`logs/fed/bert_var_methoda_a03_r30/`；归档：`checkpoints/distilbert_var_methoda_a03_r30/`。
+- **旧 pool VAR（诊断）**：r29 1.590681 / 0.462 vs 基线 1.588699 / 0.466（Δ +0.001982，p=0.0739）；平均 samples 91.9；归档 `checkpoints/distilbert_var_a03_r30/`。不作最终结果。
+- **风险**：raw var 非单调，D=4 可能假早停（标定 51% hit_low）；探针只有 8 clients，T10/T20 有噪声。若段末 D_mean 明显偏离 8 或 hit_low/high 过多，再讨论 patience / min D=6。
+- 详见 `docs/ailog/261021-111547-smell-v3-var-segmented-threshold-method-a.md`。
 
 ## 硬坑（ZOO / 精度 / 数据）
 

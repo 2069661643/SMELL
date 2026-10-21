@@ -159,3 +159,28 @@
 3. 跑 per-sample 标定（~26 min），**用 var_norm** 选 threshold 使 mean D=8；
 4. 跑 BERT a03、CATV off、VQ off、VAR ON r30；
 5. 与 a03 off 基线（1.588699/0.466）做 r29 配对；报告 D 分布、hit_low/hit_high、NLL/acc。
+
+## 八、261021-1143 实测修正（per-sample 打点，已执行）
+
+> **已被 `261021-111547` Method A 取代**：用户最终选 A（raw var、min D=4、no patience）；
+> 本节的 energy norm 只作历史对照，不是当前停止准则。
+> 本节由实现 agent 追加；不改上文拍板记录，只记录实测结果与必要修正。
+
+- per-sample 代码已实现：`ClientRunner._run_zoo_var_per_sample`，L=8、D=2..16、逐 sample 立即更新、no patience。
+- 标定：30 clients × 8 samples = **240 条 per-sample history**，`temp/var_diag_bert_a03_persample/`，11:43 完成。
+- **fork `var_norm` 实测不可用**：`mean((a-b)^2)/(mean(a^2)+mean(b^2))` 在 D=2..16 恒为 **0.9996–1.0001**（median 也 ~1.0），没有随 D 下降，无法卡 mean D=8。
+- **改用 energy 归一化**：`var_norm = raw_var / mean_t ||c_t||^2`，实测严格 ~2/D：
+  D=2 1.0003 / 4 0.5000 / 6 0.3332 / 8 0.2499 / 10 0.2001 / 12 0.1667 / 14 0.1429 / 16 0.1250。
+- **选中阈值 T=0.2537100843**：mean D=**8.000**、median D=8、hit_low(D=2)=0、hit_high(D=16)=0。
+- raw var 重尾且 D=2→4 会反弹（median 0.889→0.530，max 到 9.2e8），不适合作为停止准则；mean-norm 归一化恒 ~2.0，也不可用。
+- CLI：`--var-control {on,off}` 默认 off；`--var-threshold` 默认 **0.2537100843**（energy）；`--var-diagnose` 仅标定用。
+- 正式 run 于 11:44:16 启动：BERT a03、CATV off、VQ off、L=8、r30、eval 500；`logs/fed/bert_var_persample_a03_r30/`；归档 `checkpoints/distilbert_var_persample_a03_r30/`。
+
+### 变更列表（追加）
+
+| 时间 | 操作 | 文件 | 影响 |
+|---|---|---|---|
+| 11:43 | 完成 | per-sample diagnose | 240 histories；fork norm 恒 ~1；energy norm ~2/D |
+| 11:44 | 修改 | `src/fed/serial_fedavg.py` | 停止准则改为 energy norm；逐 sample 更新 |
+| 11:44 | 修改 | `src/fed/run_fed.py` | 默认阈值 0.2537100843；D/hit 指标 |
+| 11:44 | 启动 | `bert_var_persample_a03` | per-sample VAR ON r30 |

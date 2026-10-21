@@ -83,8 +83,8 @@ class ClientRunner:
 
     def __init__(self, model, local_steps=20, lr=1e-3, zo_eps=1e-3,
                  zo_directions=8, selector=None, collect_votes=False,
-                 # SMELL 3 ClientRunner var_control ADD — pool 级 FwdLLM 半均值 var；L 固定，轮询加样本
-                 var_control=False, var_threshold=0.0, var_diagnose=False,
+                 # SMELL 3 ClientRunner var_control ADD — per-sample raw var：D=4..16，逐 sample 立即更新
+                 var_control=False, var_threshold=0.0, var_diagnose=False, var_probe=False,
                  # SMELL 3 ClientRunner trainer ADD — zoo=前向梯度（默认，字节兼容）；bp=标准反传本地训练
                  trainer="zoo", bp_clip=1.0,
                  # SMELL 3 ClientRunner rank_rotation ADD — 激活秩掩码/秩集合（None = 旧行为，全参数）
@@ -98,10 +98,11 @@ class ClientRunner:
         self.lr = float(lr)
         self.zo_eps = float(zo_eps)
         self.zo_directions = int(zo_directions)
-        # SMELL 3 ClientRunner var_control ADD — pool 级 var；D 由 8..256 总样本决定，L 固定
+        # SMELL 3 ClientRunner var_control ADD — per-sample raw var；probe 只采样不更新
         self.var_control = bool(var_control)
         self.var_threshold = float(var_threshold)
         self.var_diagnose = bool(var_diagnose)
+        self.var_probe = bool(var_probe)
         self.selector = selector
         # SMELL 3 ClientRunner collect_votes ADD — CATV 投票开关
         self.collect_votes = bool(collect_votes)
@@ -124,7 +125,7 @@ class ClientRunner:
         return lambda: self._batch_loss(batch)
     # SMELL 3 ClientRunner classification END
 
-    # SMELL 3 ClientRunner var_control BEGIN — pool 级 var：固定 L，轮询 L 个样本，每个 pass 每样本 1 方向
+    # SMELL 3 ClientRunner var_control BEGIN — per-sample raw var：D=4..16，逐 sample 立即更新
     def _to_device_batch(self, batch):
         if isinstance(batch, dict):
             batch = batch["input_ids"]
@@ -132,64 +133,72 @@ class ClientRunner:
             return tuple(item.to(self.model.device) if torch.is_tensor(item) else item for item in batch)
         return batch.to(self.model.device)
 
-    def _run_zoo_var_pool(self, input_ids_iterable):
+    def _run_zoo_var_per_sample(self, input_ids_iterable):
         from src.train.lora import get_trainable_state_dict
-        from src.train.zoo import apply_flat_delta, flatten_trainable, half_mean_var, zo_grad
+        from src.train.zoo import apply_flat_delta, flatten_trainable, half_mean_var_stats, zo_grad
 
         self.model.eval()
         device = self.model.device
+        names, sample_flat = flatten_trainable(self.model)
+        assert names, "model has no trainable parameters"
+        initial = get_trainable_state_dict(self.model)
+        active_dim = sample_flat.numel() if self.active_index is None else int(self.active_index.numel())
+        losses = []
+        steps = 0
+        sample_stats = []
+        all_histories = []
         iterator = iter(input_ids_iterable)
-        batches = []
+
         for _ in range(self.local_steps):
             try:
                 batch = next(iterator)
             except StopIteration:
                 break
-            batches.append(self._to_device_batch(batch))
-        assert batches, "var control got no batches"
-        local = len(batches)
-        assert local % 2 == 0, f"var control requires even local samples, got {local}"
-        assert self.var_threshold > 0.0 or self.var_diagnose, (
-            "var control requires --var-threshold > 0 unless --var-diagnose")
-
-        names, sample_flat = flatten_trainable(self.model)
-        assert names, "model has no trainable parameters"
-        initial = get_trainable_state_dict(self.model)
-        active_dim = sample_flat.numel() if self.active_index is None else int(self.active_index.numel())
-        batch_sums = [torch.zeros(active_dim, dtype=torch.float32, device=device) for _ in batches]
-        losses = [float(self._batch_loss(batch).detach().cpu()) for batch in batches]
-
-        pool = []
-        var_history = []
-        total = 0
-        var_final = None
-        max_total = int(256 // local) * local
-        max_passes = max_total // local
-        for _ in range(max_passes):
-            for index, batch in enumerate(batches):
+            batch = self._to_device_batch(batch)
+            losses.append(float(self._batch_loss(batch).detach().cpu()))
+            pool = []
+            sample_sum = torch.zeros(active_dim, dtype=torch.float32, device=device)
+            d = 0
+            stats = None
+            history = []
+            while d < 16:
                 grad = zo_grad(self.model, self._loss_fn(batch), self.zo_eps, 1,
                                index=self.active_index)
                 flat = torch.cat([grad[name].reshape(-1).float() for name in names])
                 if self.active_index is not None:
                     flat = flat[self.active_index.to(device=flat.device)]
                 pool.append(flat.detach())
-                batch_sums[index].add_(flat)
-                total += 1
-            var_final = half_mean_var(pool)
-            var_history.append([total, var_final])
+                sample_sum.add_(flat)
+                d += 1
+                if d >= 4 and d % 2 == 0:
+                    stats = half_mean_var_stats(pool)
+                    if self.var_diagnose:
+                        history.append([d, stats["var"], stats["var_norm"],
+                                        stats["var_norm_energy"], stats["var_norm_mean"]])
+                    elif stats["var"] <= self.var_threshold or d >= 16:
+                        break
+            assert stats is not None, "per-sample var produced no stats"
+            average = sample_sum / float(d)
+            if not self.var_probe:
+                apply_flat_delta(self.model, (-self.lr * average).to(device), index=self.active_index)
+            steps += 1
+            sample_stats.append({
+                "D": int(d),
+                "var": float(stats["var"]),
+                "var_norm": float(stats["var_norm_energy"]),
+                "var_fork_norm": float(stats["var_norm"]),
+                "hit_low": bool(d == 4),
+                "hit_high": bool(d == 16),
+            })
             if self.var_diagnose:
-                continue
-            if var_final <= self.var_threshold:
-                break
+                all_histories.append(history)
 
-        passes = total // local
-        assert passes * local == total, f"pool size {total} not divisible by local={local}"
-        for index in range(local):
-            average = batch_sums[index] / float(passes)
-            apply_flat_delta(self.model, (-self.lr * average).to(device), index=self.active_index)
-        steps = local
         final = get_trainable_state_dict(self.model)
         delta = {name: final[name] - initial[name] for name in initial}
+        ds = [item["D"] for item in sample_stats]
+        norms = [item["var_norm"] for item in sample_stats]
+        fork_norms = [item["var_fork_norm"] for item in sample_stats]
+        raws = [item["var"] for item in sample_stats]
         return {
             "state_dict": final,
             "delta": delta,
@@ -198,12 +207,17 @@ class ClientRunner:
             "lr": self.lr,
             "trainer": self.trainer,
             "active_ranks": sorted(self.active_ranks) if self.active_ranks is not None else None,
-            "var_total_samples": int(total),
-            "var_passes": int(passes),
-            "var_final": float(var_final) if var_final is not None else None,
-            "var_hit_min": bool(total == local),
-            "var_hit_max": bool(total == max_total),
-            "var_history": var_history if self.var_diagnose else None,
+            "var_D": ds,
+            "var_total_samples": int(sum(ds)),
+            "var_D_mean": (sum(ds) / len(ds)) if ds else None,
+            "var_D_min": min(ds) if ds else None,
+            "var_D_max": max(ds) if ds else None,
+            "var_hit_low": sum(1 for item in sample_stats if item["hit_low"]),
+            "var_hit_high": sum(1 for item in sample_stats if item["hit_high"]),
+            "var_norm_mean": (sum(norms) / len(norms)) if norms else None,
+            "var_fork_norm_mean": (sum(fork_norms) / len(fork_norms)) if fork_norms else None,
+            "var_raw_mean": (sum(raws) / len(raws)) if raws else None,
+            "var_history": all_histories if self.var_diagnose else None,
         }
     # SMELL 3 ClientRunner var_control END
 
@@ -211,9 +225,9 @@ class ClientRunner:
         from src.train.lora import get_trainable_state_dict
         from src.train.zoo import _restore_flat, apply_flat_delta, flatten_trainable, zo_grad
 
-        # SMELL 3 ClientRunner var_control ADD — pool 级 var 走独立路径（L 固定，轮询 L 个样本）
+        # SMELL 3 ClientRunner var_control ADD — per-sample var 走独立路径（逐 sample 更新）
         if self.trainer == "zoo" and self.var_control:
-            return self._run_zoo_var_pool(input_ids_iterable)
+            return self._run_zoo_var_per_sample(input_ids_iterable)
 
         # SMELL 3 ClientRunner zoo_eval FIXED — ZOO 有限差分必须在 eval 模式：train 模式下 OPT dropout=0.1
         # 会让 L+/L- 两次探测拿到不同 mask，差分信号被 dropout 噪声吞掉（fp32 也救不了；audit 260928）

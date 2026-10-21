@@ -6,6 +6,7 @@ import os
 import random
 # SMELL 3 run_fed per_module_delta ADD — 解析参数名中的层号/投影名
 import re
+import statistics
 import subprocess
 import sys
 import time
@@ -62,11 +63,15 @@ def parse_args():
                         help="fixed directions; with var control it is the minimum directions per local step")
     # SMELL 3 run_fed var_control ADD — pool 级 FwdLLM 半均值 var；L 固定，样本池 8..256
     parser.add_argument("--var-control", choices=("on", "off"), default="off",
-                        help="enable pool-level var control; off = fixed --zo-directions")
-    parser.add_argument("--var-threshold", type=float, default=0.0,
-                        help="half-mean var threshold; 0=off/placeholder (calibrated value later)")
+                        help="enable per-sample raw-var control; off = fixed --zo-directions")
+    parser.add_argument("--var-threshold", type=float, default=0.587230920791626,
+                        help="per-sample raw var threshold (default = 261021 Method A r0 T0)")
     parser.add_argument("--var-diagnose", action="store_true",
-                        help="calibration only: run pool to 256 samples and log var(n) history")
+                        help="calibration only: run per-sample D=4..16 and log raw var history")
+    parser.add_argument("--var-segment-rounds", type=int, default=10,
+                        help="Method A probe interval; 0 = disable r10/r20 probes")
+    parser.add_argument("--var-probe-clients", type=int, default=8,
+                        help="Method A probe client count (default 8)")
     # SMELL 3 run_fed trainer ADD — zoo=前向梯度本地更新（默认）；bp=标准反传本地训练（Step 3 机制去风险）
     parser.add_argument("--trainer", choices=("zoo", "bp"), default="zoo")
     parser.add_argument("--bp-clip", type=float, default=1.0, help="BP grad clip norm; <=0 disables clipping")
@@ -364,6 +369,50 @@ def resolve_vq_bytes_per_element(args):
 # SMELL 3 run_fed vq END
 
 
+# SMELL 3 run_fed var_segment NEW — Method A：raw var 阈值选择（mean D<=8 且最接近 8）
+def select_var_threshold(histories, target=8.0, min_d=4, max_d=16):
+    clean = []
+    for history in histories:
+        entries = sorted((e for e in history if min_d <= e[0] <= max_d), key=lambda e: e[0])
+        if entries:
+            clean.append(entries)
+    assert clean, "select_var_threshold got no usable histories"
+    values = sorted({entry[1] for history in clean for entry in history})
+    candidates = []
+    for threshold in values:
+        ds = []
+        for history in clean:
+            chosen = max_d
+            for entry in history:
+                if entry[1] <= threshold:
+                    chosen = entry[0]
+                    break
+            ds.append(chosen)
+        mean_d = sum(ds) / len(ds)
+        candidates.append((mean_d, threshold, ds))
+    best = min(candidates, key=lambda item: (abs(item[0] - target), item[1]))
+    below = [item for item in candidates if item[0] <= target]
+    selected = max(below, key=lambda item: (item[0], -item[1])) if below else best
+    above = [item for item in candidates if item[0] > target]
+    result = {
+        "threshold": selected[1],
+        "mean_D": selected[0],
+        "median_D": statistics.median(selected[2]),
+        "min_D": min(selected[2]),
+        "max_D": max(selected[2]),
+        "hit_low": sum(1 for d in selected[2] if d == min_d),
+        "hit_high": sum(1 for d in selected[2] if d == max_d),
+        "below_available": bool(below),
+    }
+    if above and below:
+        low = max(above, key=lambda item: item[1])
+        high = min(below, key=lambda item: item[1])
+        result["bracket_low"] = {"threshold": low[1], "mean_D": low[0]}
+        result["bracket_high"] = {"threshold": high[1], "mean_D": high[0]}
+    return result
+# SMELL 3 run_fed var_segment END
+
+
 # SMELL 3 run_fed per_module_delta BEGIN — 逐层/逐投影拆分 client δ 的 L2 范数（诊断 LoRA 更新分布）
 # SMELL 3 run_fed arch MODIFIED — 模式兼容 OPT（layers.N.self_attn.q_proj）与 DistilBERT（layer.N.attention.q_lin）
 _LAYER_PATTERN = re.compile(r"(?:layers|layer)\.(\d+)\.")
@@ -593,13 +642,16 @@ def main():
             raise SystemExit("--var-control is ZOO-only")
         if args.catv == "on":
             raise SystemExit("--var-control currently requires --catv off (extra forwards would pollute votes)")
-        if args.local_steps <= 0 or args.local_steps % 2 != 0:
-            raise SystemExit(
-                f"var control requires even --local-steps (fixed L), got {args.local_steps}")
+        if args.local_steps <= 0:
+            raise SystemExit(f"var control requires --local-steps > 0, got {args.local_steps}")
         if args.vq_rate < 1.0:
             raise SystemExit("--vq-rate < 1 and var control are not combined yet")
         if not args.var_diagnose and args.var_threshold <= 0.0:
             raise SystemExit("--var-control on requires --var-threshold > 0 (or --var-diagnose)")
+        if args.var_segment_rounds < 0:
+            raise SystemExit(f"--var-segment-rounds must be >= 0, got {args.var_segment_rounds}")
+        if args.var_probe_clients <= 0:
+            raise SystemExit(f"--var-probe-clients must be > 0, got {args.var_probe_clients}")
     # SMELL 3 run_fed var_control END
     # SMELL 3 run_fed subspace_zo BEGIN — 子空间 ZO 参数校验、与秩轮换互斥、解析选择串
     if args.zo_subspace != "all" and args.rank_mode != "all":
@@ -879,6 +931,14 @@ def main():
 
     # SMELL 3 run_fed catv round0 ADD — 第 0 轮无掩码（None），掩码由上一轮投票生成
     consensus_mask = None
+    # SMELL 3 run_fed var_segment ADD — Method A 分段阈值；r0 用标定 T0，r10/r20 探针更新
+    current_var_threshold = args.var_threshold
+    var_threshold_records = []
+    if args.var_control == "on" and not args.var_diagnose:
+        var_threshold_records.append({"round": 0, "threshold": args.var_threshold,
+                                      "source": "r0_calibration"})
+        (out_dir / "var_thresholds.json").write_text(
+            json.dumps(var_threshold_records, indent=2), encoding="utf-8")
     for round_idx in range(args.rounds):
         round_started = time.time()
         # SMELL 3 run_fed rank_rotation BEGIN — 全客户端同调度：由 round_idx 决定本轮激活秩与平坦索引
@@ -937,6 +997,71 @@ def main():
                   f"total_ratio={vq_total_rate:.4f} sketch={args.vq_sketch_dtype} "
                   f"bytes/elem={resolve_vq_bytes_per_element(args)}")
         # SMELL 3 run_fed vq END
+        # SMELL 3 run_fed var_segment BEGIN — Method A r10/r20 探针：8 clients × 8 samples，不更新模型
+        var_probe_record = None
+        if (args.var_control == "on" and not args.var_diagnose
+                and args.var_segment_rounds > 0 and round_idx > 0
+                and round_idx % args.var_segment_rounds == 0):
+            probe_started = time.time()
+            probe_path = out_dir / f"var_probe_round{round_idx:03d}.jsonl"
+            probe_clients = client_names[:min(args.var_probe_clients, len(client_names))]
+            probe_histories = []
+            for probe_name in probe_clients:
+                probe_dir = data_root / args.tag / "clients" / probe_name
+                input_ids_np = np.load(probe_dir / "train_input_ids.npy", mmap_mode="r")
+                total_rows = int(input_ids_np.shape[0])
+                num_samples = total_rows
+                if args.max_train_samples > 0:
+                    num_samples = min(num_samples, args.max_train_samples)
+                probe_start = ((round_idx * args.local_steps) % total_rows
+                               if args.doc_order == "cycle" else 0)
+                load_trainable_state_dict(model, global_state)
+                probe_runner = ClientRunner(
+                    model, local_steps=args.local_steps, lr=args.lr,
+                    zo_eps=args.zo_eps, zo_directions=args.zo_directions,
+                    collect_votes=False,
+                    var_control=True, var_threshold=0.0,
+                    var_diagnose=True, var_probe=True,
+                    trainer=args.trainer, bp_clip=args.bp_clip,
+                    active_index=active_index, active_ranks=active_ranks,
+                    task=("classification" if args.arch == "distilbert" else "causal_lm"))
+                if args.arch == "distilbert":
+                    probe_iter = iter_classification_batches(
+                        probe_dir, num_samples, model.device,
+                        truncate=args.truncate, start=probe_start)
+                else:
+                    probe_iter = iter_batches(
+                        input_ids_np, num_samples, model.device,
+                        truncate=args.truncate, start=probe_start)
+                probe_result = probe_runner.run(probe_iter)
+                for sample_idx, history in enumerate(probe_result.get("var_history") or []):
+                    append_metrics(probe_path, {
+                        "event": "var_probe",
+                        "round": round_idx,
+                        "client": probe_name,
+                        "sample": sample_idx,
+                        "history": history,
+                    })
+                    probe_histories.append(history)
+            load_trainable_state_dict(model, global_state)
+            probe_selected = select_var_threshold(probe_histories)
+            current_var_threshold = probe_selected["threshold"]
+            var_threshold_records.append({"round": round_idx, "source": "probe", **probe_selected})
+            (out_dir / "var_thresholds.json").write_text(
+                json.dumps(var_threshold_records, indent=2), encoding="utf-8")
+            var_probe_record = {
+                "round": round_idx,
+                "clients": len(probe_clients),
+                "histories": len(probe_histories),
+                "file": probe_path.name,
+                "seconds": time.time() - probe_started,
+                **probe_selected,
+            }
+            print(f"[fed] var probe round {round_idx} T={current_var_threshold:.6g} "
+                  f"meanD={probe_selected['mean_D']:.3f} hit_low={probe_selected['hit_low']} "
+                  f"hit_high={probe_selected['hit_high']} "
+                  f"seconds={var_probe_record['seconds']:.1f}")
+        # SMELL 3 run_fed var_segment END
         # SMELL 3 run_fed catv round start ADD — 注入上一轮掩码；回调由 ClientRunner 自行安装/移除
         base_config.consensus_mask = consensus_mask
         base_config.vote_callback = None
@@ -959,7 +1084,7 @@ def main():
                                   collect_votes=catv_on,
                                   # SMELL 3 run_fed var_control ADD — pool 级 var；diagnose 记录 var(n)
                                   var_control=(args.var_control == "on"),
-                                  var_threshold=args.var_threshold,
+                                  var_threshold=current_var_threshold,
                                   var_diagnose=args.var_diagnose,
                                   # SMELL 3 run_fed trainer ADD — 本地训练器与 BP 裁剪阈值
                                   trainer=args.trainer, bp_clip=args.bp_clip,
@@ -974,15 +1099,17 @@ def main():
                 batch_iter = iter_batches(input_ids_np, num_samples, model.device,
                                           truncate=args.truncate, start=round_start)
             result = runner.run(batch_iter)
-            # SMELL 3 run_fed var_control ADD — diagnose 历史单独落 JSONL（每 client 的 pool var(n) 曲线）
+            # SMELL 3 run_fed var_control ADD — diagnose 每个 sample 单独落 JSONL（D, raw, norm）
             if args.var_diagnose and result.get("var_history"):
-                append_metrics(out_dir / "var_diagnose.jsonl", {
-                    "event": "var_diagnose",
-                    "round": round_idx,
-                    "client": name,
-                    "local_samples": result.get("steps"),
-                    "history": result["var_history"],
-                })
+                for sample_idx, history in enumerate(result["var_history"]):
+                    append_metrics(out_dir / "var_diagnose.jsonl", {
+                        "event": "var_diagnose",
+                        "round": round_idx,
+                        "client": name,
+                        "sample": sample_idx,
+                        "local_samples": result.get("steps"),
+                        "history": history,
+                    })
             # SMELL 3 run_fed delta_clip BEGIN — 逐 client delta 范数裁剪：重尾 ZO 估计的离群 client（如 δ=2.4e4）
             # 在 FedAvg 里会直接毒化全局模型；按范数缩放保方向、只裁离群（审计 260929-110000）
             client_delta = result["delta"]
@@ -1032,12 +1159,17 @@ def main():
                 "vq_cos": vq_cos,
                 "vq_delta_norm": vq_delta_norm,
                 "vq_client_bytes": vq_client_bytes,
-                # SMELL 3 run_fed var_control ADD — pool 总样本/var/是否 hit 8/256
+                # SMELL 3 run_fed var_control ADD — per-sample D/var_norm/hit_low/hit_high
+                "var_D": result.get("var_D"),
+                "var_D_mean": result.get("var_D_mean"),
+                "var_D_min": result.get("var_D_min"),
+                "var_D_max": result.get("var_D_max"),
                 "var_total_samples": result.get("var_total_samples"),
-                "var_passes": result.get("var_passes"),
-                "var_final": result.get("var_final"),
-                "var_hit_min": result.get("var_hit_min"),
-                "var_hit_max": result.get("var_hit_max"),
+                "var_hit_low": result.get("var_hit_low"),
+                "var_hit_high": result.get("var_hit_high"),
+                "var_norm_mean": result.get("var_norm_mean"),
+                "var_fork_norm_mean": result.get("var_fork_norm_mean"),
+                "var_raw_mean": result.get("var_raw_mean"),
                 # SMELL 3 run_fed doc_order ADD — 本轮该 client 的起始行（cycle 复现/核对用）
                 "round_start": round_start,
             }
@@ -1095,13 +1227,18 @@ def main():
             if vq_enabled else None)
         vq_total_ratio_bytes_vs_one_delta = (
             vq_channels * vq_ratio_bytes if vq_enabled else None)
-        # SMELL 3 run_fed var_control ADD — 跨 client 的 pool 总样本/var/hit 汇总
-        var_samples_all = [stats["var_total_samples"] for stats in client_stats.values()
-                           if stats.get("var_total_samples") is not None]
-        var_finals_all = [stats["var_final"] for stats in client_stats.values()
-                          if stats.get("var_final") is not None]
-        var_hit_min_clients = sum(1 for stats in client_stats.values() if stats.get("var_hit_min"))
-        var_hit_max_clients = sum(1 for stats in client_stats.values() if stats.get("var_hit_max"))
+        # SMELL 3 run_fed var_control ADD — 跨 client/sample 的 D、var_norm、hit 汇总
+        var_D_all = [d for stats in client_stats.values() for d in (stats.get("var_D") or [])]
+        var_total_all = [stats["var_total_samples"] for stats in client_stats.values()
+                         if stats.get("var_total_samples") is not None]
+        var_norm_all = [stats["var_norm_mean"] for stats in client_stats.values()
+                        if stats.get("var_norm_mean") is not None]
+        var_fork_norm_all = [stats["var_fork_norm_mean"] for stats in client_stats.values()
+                             if stats.get("var_fork_norm_mean") is not None]
+        var_raw_all = [stats["var_raw_mean"] for stats in client_stats.values()
+                       if stats.get("var_raw_mean") is not None]
+        var_hit_low_samples = sum(stats.get("var_hit_low", 0) for stats in client_stats.values())
+        var_hit_high_samples = sum(stats.get("var_hit_high", 0) for stats in client_stats.values())
         record = {
             "event": "round",
             "round": round_idx,
@@ -1141,18 +1278,23 @@ def main():
             "vq_total_ratio_elements": vq_total_ratio_elements,
             "vq_ratio_bytes": vq_ratio_bytes,
             "vq_total_ratio_bytes_vs_one_delta": vq_total_ratio_bytes_vs_one_delta,
-            # SMELL 3 run_fed var_control ADD — pool 总样本 8..256 的诊断
+            # SMELL 3 run_fed var_control ADD — per-sample D=2..16 的诊断
             "var_control": args.var_control,
-            "var_threshold": args.var_threshold,
+            "var_threshold": current_var_threshold,
+            "var_probe": var_probe_record,
             "var_diagnose": args.var_diagnose,
-            "var_total_samples_mean": (sum(var_samples_all) / len(var_samples_all)) if var_samples_all else None,
-            "var_total_samples_min": min(var_samples_all) if var_samples_all else None,
-            "var_total_samples_max": max(var_samples_all) if var_samples_all else None,
-            "var_passes_mean": ((sum(var_samples_all) / len(var_samples_all)) / args.local_steps
-                                if var_samples_all else None),
-            "var_hit_min_clients": var_hit_min_clients,
-            "var_hit_max_clients": var_hit_max_clients,
-            "var_final_mean": (sum(var_finals_all) / len(var_finals_all)) if var_finals_all else None,
+            "var_D_mean": (sum(var_D_all) / len(var_D_all)) if var_D_all else None,
+            "var_D_min": min(var_D_all) if var_D_all else None,
+            "var_D_max": max(var_D_all) if var_D_all else None,
+            "var_total_samples_mean": (sum(var_total_all) / len(var_total_all)) if var_total_all else None,
+            "var_total_samples_min": min(var_total_all) if var_total_all else None,
+            "var_total_samples_max": max(var_total_all) if var_total_all else None,
+            "var_hit_low_samples": var_hit_low_samples,
+            "var_hit_high_samples": var_hit_high_samples,
+            "var_norm_mean": (sum(var_norm_all) / len(var_norm_all)) if var_norm_all else None,
+            "var_fork_norm_mean": (sum(var_fork_norm_all) / len(var_fork_norm_all))
+                                  if var_fork_norm_all else None,
+            "var_raw_mean": (sum(var_raw_all) / len(var_raw_all)) if var_raw_all else None,
             "var_diagnose_file": (str(out_dir / "var_diagnose.jsonl")
                                   if args.var_diagnose else None),
             "weight": args.weight,
@@ -1217,11 +1359,13 @@ def main():
             print(f"[fed] vq round {round_idx} per_result_ratio={vq_ratio_elements:.4f} "
                   f"total_ratio={vq_total_ratio_elements:.3f} cos_mean={record['vq_cos_mean']:.4f} "
                   f"vq_bytes={vq_communication_bytes} dense_all={dense_all_results_communication_bytes}")
-        if (args.var_control == "on" or args.var_diagnose) and record["var_total_samples_mean"] is not None:
-            print(f"[fed] var round {round_idx} samples_mean={record['var_total_samples_mean']:.2f} "
-                  f"samples_min={record['var_total_samples_min']} samples_max={record['var_total_samples_max']} "
-                  f"passes_mean={record['var_passes_mean']:.2f} var_final={record['var_final_mean']:.6g} "
-                  f"hit_min={var_hit_min_clients} hit_max={var_hit_max_clients}")
+        if (args.var_control == "on" or args.var_diagnose) and record["var_D_mean"] is not None:
+            print(f"[fed] var round {round_idx} T={current_var_threshold:.6g} "
+                  f"D_mean={record['var_D_mean']:.2f} "
+                  f"D_min={record['var_D_min']} D_max={record['var_D_max']} "
+                  f"samples_mean={record['var_total_samples_mean']:.1f} "
+                  f"raw_var={record['var_raw_mean']:.6g} "
+                  f"hit_low={var_hit_low_samples} hit_high={var_hit_high_samples}")
 
         # SMELL 3 run_fed save_every ADD — 每 N 轮存 adapter（秒级），与 eval（分钟级）解耦
         save_due = args.save_every > 0 and (round_idx + 1) % args.save_every == 0
