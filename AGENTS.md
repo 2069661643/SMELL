@@ -107,6 +107,16 @@ $PY src/fed/run_fed.py --arch distilbert --tag a01 --gpu 0 --trainer zoo \
   --vq-rate 0.5 --vq-sketch-dtype bf16 --out-root temp/smoke_vq_bert
 ```
 
+## VAR（per-sample）— 261021 拍板方案
+
+- **当前代码仍是 pool 级 VAR**（`ClientRunner._run_zoo_var_pool`：固定模型轮询 L 样本 + 采样后更新）；它只作历史/诊断，**不要当最终方案**，也不要拿它和基线做干净消融。
+- **拍板方案**：逐 sample 测 var；L=8 固定；D 低点 **2**、高点 **16**；目标 **mean D=8**（mean total samples=64）；**no patience**；逐 sample 采样后**立即更新**，再进入下一个 sample（与基线 schedule 一致）。
+- **数据异质不影响**：每个 sample 的 var pool 只含该 sample 自己的方向贡献，不跨 sample 混池。
+- **标定**：per-sample var(D=2,4,…,16)，30 clients × 8 samples = 240 条 history；选阈值使 mean D=8；同时记录 raw/norm、hit_low(D=2)/hit_high(D=16)、D 分布。
+- **正式**：BERT a03、CATV off、VQ off、L=8、r30、eval 500；基线 a03 off = r29 NLL **1.588699 / acc 0.466**。CATV/VQ 本次均 off，不需要重测；若以后组合，D 逐 sample 变化会影响 CATV vote 权重与 VQ 的 C。
+- **风险**：D=2 时只有 1 vs 1，var 噪声大；no patience 可能撞低点/高点。标定必须报告 hit_low/high 与 D 分布；若 mean=8 不可达或方差过大，回来讨论 min D=4 / patience=2。
+- 详见 `docs/ailog/261021-095531-smell-v3-var-per-sample-plan-and-schedule-discussion.md`。
+
 ## 硬坑（ZOO / 精度 / 数据）
 
 - **ZOO 必须在 `model.eval()` 下做有限差分**：train 模式 OPT dropout=0.1 会让 L+/L- 拿到不同 mask，差分被噪声吞掉（`260929-000200`）。
@@ -187,6 +197,7 @@ bash -n scripts/setup_server.sh scripts/run_ablation_cloud.sh
 | 文件 | 内容 |
 |---|---|
 | `docs/weight-manifest.md`（非 ailog） | **换机交接**：权重/数据路径 + sha256 + OPT/BERT 运行 flags |
+| `docs/ailog/261021-095531-...var-per-sample-plan-and-schedule-discussion.md` | **VAR 拍板方案**：per-sample、D=2..16、mean8、no patience；当前 pool 级仅诊断 |
 | `docs/ailog/261020-090000-...opt-r30-fixed-results-catv-mask-alpha.md` | **OPT r30 fixed 四臂 + r0 补测**：CATV 为掩码主导、α 依赖 |
 | `docs/ailog/261015-213000-...bert-r30-fixed-four-arm-results.md` | **BERT r30 fixed 四臂**：CATV 显著；weight/mask 分解 |
 | `docs/ailog/261014-111800-...bert-catv-padding-vote-artifact-fix-handoff.md` | BERT CATV padding 伪影 + valid-mean/block0 修复 |
