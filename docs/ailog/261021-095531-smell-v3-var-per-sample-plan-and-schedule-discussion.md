@@ -60,12 +60,11 @@
 - 同“固定模型轮询 + 采样后更新”的 VAR OFF，或把 `D_i` 随机打乱分配给 client；
   用于隔离 schedule 与分配效应。计算成本各 +7h；本次不排入。
 
-### 3.3 归一化
+### 3.3 归一化（已拍板启用）
 
-- 建议公式：`var_norm = mean((a-b)^2) / (mean(a^2)+mean(b^2)+eps)`；
+- **归一化启用**：`var_norm = mean((a-b)^2) / (mean(a^2)+mean(b^2)+eps)`；
   无量纲、随 D 增大下降，比绝对 var 更不容易随训练尺度漂移。
-- 本次 per-sample 标定应同时记录 raw var 与 var_norm；阈值默认优先用 var_norm。
-  （若用户要求 raw var，以拍板为准。）
+- per-sample 标定**用 var_norm 选阈值**；raw var 只作为对照记录，不作为默认停止准则。
 
 ## 四、**用户拍板方案（其他 agent 以此为准）**
 
@@ -74,6 +73,7 @@
 | 项 | 决定 |
 |---|---|
 | var 统计 | **逐 sample** 计算；每个 sample 的 pool 只含该 sample 自己的方向贡献 |
+| 归一化 | **启用**：`var_norm = mean((a-b)^2)/(mean(a^2)+mean(b^2)+eps)`；停止准则用 var_norm，raw var 仅记录对照 |
 | 目标 | **mean D = 8**（每个 sample 平均 8 个方向；L=8 → mean total samples=64） |
 | D 低点 | **2** |
 | D 高点 | **16**（L=8 → 单 client 单轮最多 128 samples） |
@@ -82,13 +82,16 @@
 | 更新 schedule | **逐 sample 采样 → 立即更新 → 下一个 sample**；与基线顺序更新一致，可行 |
 | 基线 | 不改；`--var-control off` 时仍为固定 D=8 的原路径 |
 
+> **实现责任**：本文只记录用户拍板的方案；代码修改由后续实现 agent 执行。
+> 当前仓库代码仍是 pool 级 VAR（`_run_zoo_var_pool`），**不能直接用于本 per-sample 实验**。
+
 ### 4.2 逐 sample 流程
 
 对 client 的每个 local sample（共 L=8）：
 
-1. 从 `D=2` 开始，在当前模型上采 2 个方向，算 per-sample `var`；
-2. 若 `var <= threshold`，用这 D 个方向的平均梯度**立即更新**，进入下一个 sample；
-3. 否则每次增加方向（只在偶数 D 检查：2,4,6,…,16），直到 `var <= threshold` 或 `D=16`；
+1. 从 `D=2` 开始，在当前模型上采 2 个方向，算 per-sample `var_norm`；
+2. 若 `var_norm <= threshold`，用这 D 个方向的平均梯度**立即更新**，进入下一个 sample；
+3. 否则每次增加方向（只在偶数 D 检查：2,4,6,…,16），直到 `var_norm <= threshold` 或 `D=16`；
 4. `D=16` 仍未达标则强制接受，记录 `hit_high`；`D=2` 即停记录 `hit_low`。
 
 - 每个 sample 的 var 只用该 sample 的贡献，所以数据异质性不会进入 var。
@@ -97,9 +100,9 @@
 ### 4.3 标定（per-sample diagnose）
 
 - BERT a03、CATV off、VQ off、L=8、LoRA r=1、16k。
-- 对每个 sample 跑到 `D=16`，记录 `var(D)`（D=2,4,…,16）与 raw/norm；
+- 对每个 sample 跑到 `D=16`，记录 `var_raw(D)` 与 `var_norm(D)`（D=2,4,…,16）；
   30 clients × 8 samples = **240 条 per-sample history**。
-- 选 threshold 使 **mean stopping D = 8**（即 mean total samples=64）；
+- **用 var_norm 选 threshold**，使 **mean stopping D = 8**（即 mean total samples=64）；
   同时记录 hit_low(D=2)、hit_high(D=16)、D 分布、var 分位数。
 - 预计成本：30 clients × 8 samples × 16 dirs × 2 forwards ≈ 7,680 forwards，
   约 **26 min**（cap 128）。
@@ -128,13 +131,12 @@
 
 ## 五、风险 / 待确认（开工前已知）
 
-1. **D=2 的 var 噪声极大**：只有 1 vs 1（前一半/后一半各 1 个方向），
-   `var = mean((c1-c2)^2/2)`，单次判断容易撞低点或高点；no patience 会放大这一点。
-   标定必须报告 hit_low/hit_high 与 D 分布；若 mean=8 不可达或方差过大，需要回来讨论
-   （可能要 min D=4 或 patience=2，但这与当前拍板冲突）。
+1. **D=2 的 var 噪声极大（用户已知悉）**：只有 1 vs 1（前一半/后一半各 1 个方向），
+   单次判断容易撞低点或高点；no patience 会放大这一点。本次先按拍板跑标定，
+   **看 hit_low(D=2) 多不多**再决定；若 hit_low 过多或 mean=8 不可达，再回来讨论
+   min D=4 / patience=2。
 2. **阈值跨轮漂移**：per-sample 标定在 round-0 做；训练后段 var 可能上移。
-   建议标定同时记录 var_norm，并在 r0/r10 做小样本复核；若漂移明显，改用 var_norm
-   或每 N 轮重标定。
+   **已启用 var_norm**；仍建议在 r0/r10 做小样本复核；若漂移明显，再加每 N 轮重标定。
 3. **当前代码仍是 pool 级**：`ClientRunner._run_zoo_var_pool` 是“固定模型轮询 + 采样后更新”，
    **不是本次拍板方案**；实现时必须改成 per-sample 顺序更新。`zo_grad` 与
    `half_mean_var` 可复用。旧 pool VAR ON 结果只作诊断，不能当最终 VAR 结果。
@@ -146,13 +148,14 @@
 | 时间 | 操作 | 文件 | 影响 |
 |---|---|---|---|
 | 09:55 | 新增 | 本 ailog | 记录讨论、备选方案、per-sample 拍板方案 |
-| 09:55 | 待办 | `src/fed/serial_fedavg.py` 等 | 实现 per-sample VAR（当前仍是 pool 级） |
+| 10:00 | 修订拍板 | 本 ailog | **归一化启用**（var_norm 选阈值）；D=2 噪声用户已知悉，先看 hit_low；代码由实现 agent 改 |
+| 09:55 | 待办 | `src/fed/serial_fedavg.py` 等 | 实现 per-sample VAR（当前仍是 pool 级；本 agent 不执行） |
 | 09:55 | 待办 | BERT a03 标定 | per-sample var(D)，目标 mean D=8，cap 16 |
 
 ## 七、下一步（串行）
 
 1. 等当前 pool VAR ON r30 结束（仅诊断，r29 归档）；
 2. 实现 per-sample VAR：L=8、D=2..16、逐 sample 更新、no patience；
-3. 跑 per-sample 标定（~26 min），选 threshold（优先 var_norm）使 mean D=8；
+3. 跑 per-sample 标定（~26 min），**用 var_norm** 选 threshold 使 mean D=8；
 4. 跑 BERT a03、CATV off、VQ off、VAR ON r30；
 5. 与 a03 off 基线（1.588699/0.466）做 r29 配对；报告 D 分布、hit_low/hit_high、NLL/acc。

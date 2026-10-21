@@ -111,10 +111,12 @@ $PY src/fed/run_fed.py --arch distilbert --tag a01 --gpu 0 --trainer zoo \
 
 - **当前代码仍是 pool 级 VAR**（`ClientRunner._run_zoo_var_pool`：固定模型轮询 L 样本 + 采样后更新）；它只作历史/诊断，**不要当最终方案**，也不要拿它和基线做干净消融。
 - **拍板方案**：逐 sample 测 var；L=8 固定；D 低点 **2**、高点 **16**；目标 **mean D=8**（mean total samples=64）；**no patience**；逐 sample 采样后**立即更新**，再进入下一个 sample（与基线 schedule 一致）。
+- **归一化启用**：`var_norm = mean((a-b)^2)/(mean(a^2)+mean(b^2)+eps)`；**停止准则用 var_norm**，raw var 只作对照记录。
 - **数据异质不影响**：每个 sample 的 var pool 只含该 sample 自己的方向贡献，不跨 sample 混池。
-- **标定**：per-sample var(D=2,4,…,16)，30 clients × 8 samples = 240 条 history；选阈值使 mean D=8；同时记录 raw/norm、hit_low(D=2)/hit_high(D=16)、D 分布。
+- **标定**：per-sample var(D=2,4,…,16)，30 clients × 8 samples = 240 条 history；用 var_norm 选阈值使 mean D=8；同时记录 raw/norm、hit_low(D=2)/hit_high(D=16)、D 分布。
 - **正式**：BERT a03、CATV off、VQ off、L=8、r30、eval 500；基线 a03 off = r29 NLL **1.588699 / acc 0.466**。CATV/VQ 本次均 off，不需要重测；若以后组合，D 逐 sample 变化会影响 CATV vote 权重与 VQ 的 C。
-- **风险**：D=2 时只有 1 vs 1，var 噪声大；no patience 可能撞低点/高点。标定必须报告 hit_low/high 与 D 分布；若 mean=8 不可达或方差过大，回来讨论 min D=4 / patience=2。
+- **风险**：D=2 时只有 1 vs 1，var 噪声大（用户已知悉）；本次先看 hit_low 多不多再决定，no patience 暂不变。标定必须报告 hit_low/high 与 D 分布；若 mean=8 不可达或方差过大，回来讨论 min D=4 / patience=2。
+- **实现责任**：本文只记录拍板方案；代码修改由后续实现 agent 执行，当前代码仍是 pool 级。
 - 详见 `docs/ailog/261021-095531-smell-v3-var-per-sample-plan-and-schedule-discussion.md`。
 
 ## 硬坑（ZOO / 精度 / 数据）
