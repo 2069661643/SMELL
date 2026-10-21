@@ -58,7 +58,15 @@ def parse_args():
     parser.add_argument("--max-clients", type=int, default=0)
     parser.add_argument("--max-train-samples", type=int, default=0)
     parser.add_argument("--zo-eps", type=float, default=1e-3)
-    parser.add_argument("--zo-directions", type=int, default=8)
+    parser.add_argument("--zo-directions", type=int, default=8,
+                        help="fixed directions; with var control it is the minimum directions per local step")
+    # SMELL 3 run_fed var_control ADD — pool 级 FwdLLM 半均值 var；L 固定，样本池 8..256
+    parser.add_argument("--var-control", choices=("on", "off"), default="off",
+                        help="enable pool-level var control; off = fixed --zo-directions")
+    parser.add_argument("--var-threshold", type=float, default=0.0,
+                        help="half-mean var threshold; 0=off/placeholder (calibrated value later)")
+    parser.add_argument("--var-diagnose", action="store_true",
+                        help="calibration only: run pool to 256 samples and log var(n) history")
     # SMELL 3 run_fed trainer ADD — zoo=前向梯度本地更新（默认）；bp=标准反传本地训练（Step 3 机制去风险）
     parser.add_argument("--trainer", choices=("zoo", "bp"), default="zoo")
     parser.add_argument("--bp-clip", type=float, default=1.0, help="BP grad clip norm; <=0 disables clipping")
@@ -575,6 +583,24 @@ def main():
         if resolve_vq_channels(args) <= 0:
             raise SystemExit("--vq-rate < 1 resolved 0 channels; check --local-steps/--zo-directions")
     # SMELL 3 run_fed vq END
+    # SMELL 3 run_fed var_control BEGIN — var 仅 ZOO；D 自适应，L 固定；暂不与 VQ 叠加
+    if args.var_threshold < 0:
+        raise SystemExit(f"--var-threshold must be >= 0, got {args.var_threshold}")
+    if args.var_diagnose and args.var_control != "on":
+        raise SystemExit("--var-diagnose requires --var-control on")
+    if args.var_control == "on" or args.var_diagnose:
+        if args.trainer != "zoo":
+            raise SystemExit("--var-control is ZOO-only")
+        if args.catv == "on":
+            raise SystemExit("--var-control currently requires --catv off (extra forwards would pollute votes)")
+        if args.local_steps <= 0 or args.local_steps % 2 != 0:
+            raise SystemExit(
+                f"var control requires even --local-steps (fixed L), got {args.local_steps}")
+        if args.vq_rate < 1.0:
+            raise SystemExit("--vq-rate < 1 and var control are not combined yet")
+        if not args.var_diagnose and args.var_threshold <= 0.0:
+            raise SystemExit("--var-control on requires --var-threshold > 0 (or --var-diagnose)")
+    # SMELL 3 run_fed var_control END
     # SMELL 3 run_fed subspace_zo BEGIN — 子空间 ZO 参数校验、与秩轮换互斥、解析选择串
     if args.zo_subspace != "all" and args.rank_mode != "all":
         raise SystemExit(
@@ -931,6 +957,10 @@ def main():
             runner = ClientRunner(model, local_steps=args.local_steps, lr=args.lr,
                                   zo_eps=args.zo_eps, zo_directions=args.zo_directions,
                                   collect_votes=catv_on,
+                                  # SMELL 3 run_fed var_control ADD — pool 级 var；diagnose 记录 var(n)
+                                  var_control=(args.var_control == "on"),
+                                  var_threshold=args.var_threshold,
+                                  var_diagnose=args.var_diagnose,
                                   # SMELL 3 run_fed trainer ADD — 本地训练器与 BP 裁剪阈值
                                   trainer=args.trainer, bp_clip=args.bp_clip,
                                   # SMELL 3 run_fed rank_rotation ADD — 本轮激活秩掩码
@@ -944,6 +974,15 @@ def main():
                 batch_iter = iter_batches(input_ids_np, num_samples, model.device,
                                           truncate=args.truncate, start=round_start)
             result = runner.run(batch_iter)
+            # SMELL 3 run_fed var_control ADD — diagnose 历史单独落 JSONL（每 client 的 pool var(n) 曲线）
+            if args.var_diagnose and result.get("var_history"):
+                append_metrics(out_dir / "var_diagnose.jsonl", {
+                    "event": "var_diagnose",
+                    "round": round_idx,
+                    "client": name,
+                    "local_samples": result.get("steps"),
+                    "history": result["var_history"],
+                })
             # SMELL 3 run_fed delta_clip BEGIN — 逐 client delta 范数裁剪：重尾 ZO 估计的离群 client（如 δ=2.4e4）
             # 在 FedAvg 里会直接毒化全局模型；按范数缩放保方向、只裁离群（审计 260929-110000）
             client_delta = result["delta"]
@@ -993,6 +1032,12 @@ def main():
                 "vq_cos": vq_cos,
                 "vq_delta_norm": vq_delta_norm,
                 "vq_client_bytes": vq_client_bytes,
+                # SMELL 3 run_fed var_control ADD — pool 总样本/var/是否 hit 8/256
+                "var_total_samples": result.get("var_total_samples"),
+                "var_passes": result.get("var_passes"),
+                "var_final": result.get("var_final"),
+                "var_hit_min": result.get("var_hit_min"),
+                "var_hit_max": result.get("var_hit_max"),
                 # SMELL 3 run_fed doc_order ADD — 本轮该 client 的起始行（cycle 复现/核对用）
                 "round_start": round_start,
             }
@@ -1050,6 +1095,13 @@ def main():
             if vq_enabled else None)
         vq_total_ratio_bytes_vs_one_delta = (
             vq_channels * vq_ratio_bytes if vq_enabled else None)
+        # SMELL 3 run_fed var_control ADD — 跨 client 的 pool 总样本/var/hit 汇总
+        var_samples_all = [stats["var_total_samples"] for stats in client_stats.values()
+                           if stats.get("var_total_samples") is not None]
+        var_finals_all = [stats["var_final"] for stats in client_stats.values()
+                          if stats.get("var_final") is not None]
+        var_hit_min_clients = sum(1 for stats in client_stats.values() if stats.get("var_hit_min"))
+        var_hit_max_clients = sum(1 for stats in client_stats.values() if stats.get("var_hit_max"))
         record = {
             "event": "round",
             "round": round_idx,
@@ -1089,6 +1141,20 @@ def main():
             "vq_total_ratio_elements": vq_total_ratio_elements,
             "vq_ratio_bytes": vq_ratio_bytes,
             "vq_total_ratio_bytes_vs_one_delta": vq_total_ratio_bytes_vs_one_delta,
+            # SMELL 3 run_fed var_control ADD — pool 总样本 8..256 的诊断
+            "var_control": args.var_control,
+            "var_threshold": args.var_threshold,
+            "var_diagnose": args.var_diagnose,
+            "var_total_samples_mean": (sum(var_samples_all) / len(var_samples_all)) if var_samples_all else None,
+            "var_total_samples_min": min(var_samples_all) if var_samples_all else None,
+            "var_total_samples_max": max(var_samples_all) if var_samples_all else None,
+            "var_passes_mean": ((sum(var_samples_all) / len(var_samples_all)) / args.local_steps
+                                if var_samples_all else None),
+            "var_hit_min_clients": var_hit_min_clients,
+            "var_hit_max_clients": var_hit_max_clients,
+            "var_final_mean": (sum(var_finals_all) / len(var_finals_all)) if var_finals_all else None,
+            "var_diagnose_file": (str(out_dir / "var_diagnose.jsonl")
+                                  if args.var_diagnose else None),
             "weight": args.weight,
             "lr": args.lr,
             "local_steps": args.local_steps,
@@ -1151,6 +1217,11 @@ def main():
             print(f"[fed] vq round {round_idx} per_result_ratio={vq_ratio_elements:.4f} "
                   f"total_ratio={vq_total_ratio_elements:.3f} cos_mean={record['vq_cos_mean']:.4f} "
                   f"vq_bytes={vq_communication_bytes} dense_all={dense_all_results_communication_bytes}")
+        if (args.var_control == "on" or args.var_diagnose) and record["var_total_samples_mean"] is not None:
+            print(f"[fed] var round {round_idx} samples_mean={record['var_total_samples_mean']:.2f} "
+                  f"samples_min={record['var_total_samples_min']} samples_max={record['var_total_samples_max']} "
+                  f"passes_mean={record['var_passes_mean']:.2f} var_final={record['var_final_mean']:.6g} "
+                  f"hit_min={var_hit_min_clients} hit_max={var_hit_max_clients}")
 
         # SMELL 3 run_fed save_every ADD — 每 N 轮存 adapter（秒级），与 eval（分钟级）解耦
         save_due = args.save_every > 0 and (round_idx + 1) % args.save_every == 0

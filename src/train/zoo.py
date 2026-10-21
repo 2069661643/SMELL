@@ -140,10 +140,27 @@ def _restore_flat(model, flat, index=None):
             offset += numel
 
 
-def zo_grad(model, loss_fn, eps, num_directions, generator=None, index=None) -> dict:
+# SMELL 3 zoo var_control NEW — FwdLLM 半均值 var（不是样本方差；随 D 增大而下降）
+def half_mean_var(contributions):
+    """FwdLLM calculate_var 的等价实现：前后两半均值的 var，再对元素取 mean。"""
+    import torch
+    n = len(contributions)
+    assert n >= 2 and n % 2 == 0, f"half_mean_var requires even n>=2, got {n}"
+    half = n // 2
+    first = torch.stack(contributions[:half], dim=0).mean(dim=0)
+    second = torch.stack(contributions[half:], dim=0).mean(dim=0)
+    return float(torch.var(torch.stack([first, second], dim=0), dim=0).mean())
+
+
+def zo_grad(model, loss_fn, eps, num_directions, generator=None, index=None,
+            var_threshold=0.0, var_max_directions=None, var_collect_history=False,
+            var_diagnose=False, return_stats=False):
     names, full_flat = flatten_trainable(model)
     if not names:
-        return {}
+        stats = {"directions": 0, "var": None, "max_hit": False,
+                 "var_history": None, "min_directions": int(num_directions),
+                 "max_directions": int(num_directions), "diagnose": bool(var_diagnose)}
+        return ({}, stats) if return_stats else {}
     device = full_flat.device
     # SMELL 3 zoo rank_rotation BEGIN — index 非 None 时中心差分只在激活子空间进行，dim 收缩为该子空间元素数
     if index is None:
@@ -156,7 +173,22 @@ def zo_grad(model, loss_fn, eps, num_directions, generator=None, index=None) -> 
     dim = active.numel()
     assert dim > 0, "active subspace is empty"
     grad = torch.zeros(dim, dtype=torch.float32, device=device)  # SMELL 3 zo_grad FIXED — grad 需与 direction 同设备
-    for _ in range(num_directions):
+    # SMELL 3 zoo var_control BEGIN — var<=threshold 时提前停止；否则每 2 个方向加一次
+    min_directions = int(num_directions)
+    assert min_directions > 0, f"num_directions must be > 0, got {min_directions}"
+    adaptive = bool(var_threshold > 0.0 or var_diagnose)
+    max_directions = int(var_max_directions) if var_max_directions is not None else min_directions
+    if adaptive:
+        assert max_directions >= min_directions, (
+            f"var_max_directions={max_directions} < num_directions={min_directions}")
+        assert max_directions % 2 == 0, f"var_max_directions must be even, got {max_directions}"
+    contributions = []
+    var_history = []
+    var_final = None
+    broke = False
+    n = 0
+    loop_directions = max_directions if adaptive else min_directions
+    for step_idx in range(loop_directions):
         direction = torch.randn(dim, generator=generator, dtype=torch.float32).to(device)
         direction = direction / direction.norm()
         apply_flat_delta(model, eps * direction, index=active_index)
@@ -171,8 +203,24 @@ def zo_grad(model, loss_fn, eps, num_directions, generator=None, index=None) -> 
             _restore_flat(model, full_flat[active_index], index=active_index)
         assert torch.equal(flatten_trainable(model)[1], full_flat), "zo_grad failed to restore parameters"
         # SMELL 3 zo_grad：单位范数 v 满足 E[vvᵀ]=I/dim，按 dim 补偿后才是无偏梯度估计
-        grad += dim * ((loss_plus - loss_minus) / (2.0 * eps)) * direction
-    grad /= float(num_directions)
+        contribution = dim * ((loss_plus - loss_minus) / (2.0 * eps)) * direction
+        grad += contribution
+        n = step_idx + 1
+        if adaptive:
+            contributions.append(contribution.detach())
+            if n >= min_directions and n % 2 == 0:
+                var_value = half_mean_var(contributions)
+                var_final = var_value
+                if var_collect_history:
+                    var_history.append([n, var_value])
+                if not var_diagnose and var_value <= var_threshold:
+                    broke = True
+                    break
+    if adaptive and n == 0:
+        raise AssertionError("var control ran 0 directions")
+    max_hit = bool(adaptive and not broke)
+    grad /= float(n)
+    # SMELL 3 zoo var_control END
     if active_index is not None:
         full_grad = torch.zeros(total, dtype=grad.dtype, device=device)
         full_grad[active_index] = grad
@@ -185,6 +233,17 @@ def zo_grad(model, loss_fn, eps, num_directions, generator=None, index=None) -> 
         numel = param.numel()
         out[name] = grad[offset : offset + numel].reshape(param.shape).clone()
         offset += numel
+    stats = {
+        "directions": int(n),
+        "var": var_final,
+        "max_hit": max_hit,
+        "var_history": var_history if (adaptive and var_collect_history) else None,
+        "min_directions": min_directions,
+        "max_directions": max_directions if adaptive else min_directions,
+        "diagnose": bool(var_diagnose),
+    }
+    if return_stats:
+        return out, stats
     return out
 
 
@@ -237,6 +296,25 @@ def _run_selftest():
         for name in grad_auto
     )
     results["zo_grad restore exact"] = bool(torch.equal(flatten_trainable(model)[1], flat))
+
+    # SMELL 3 zoo var_control ADD — 半均值 var：高阈值早停 / diagnose 全历史 / 低阈值 hit max
+    _, stats_stop = zo_grad(model, loss_fn, eps=1e-3, num_directions=2,
+                            generator=torch.Generator().manual_seed(4321),
+                            var_threshold=1e30, var_max_directions=8, return_stats=True)
+    _, stats_diag = zo_grad(model, loss_fn, eps=1e-3, num_directions=2,
+                            generator=torch.Generator().manual_seed(4321),
+                            var_diagnose=True, var_max_directions=8,
+                            var_collect_history=True, return_stats=True)
+    _, stats_low = zo_grad(model, loss_fn, eps=1e-3, num_directions=2,
+                           generator=torch.Generator().manual_seed(4321),
+                           var_threshold=1e-30, var_max_directions=8, return_stats=True)
+    results["var stops at min"] = bool(stats_stop["directions"] == 2 and not stats_stop["max_hit"])
+    results["var diagnose history"] = bool(
+        stats_diag["directions"] == 8 and stats_diag["var_history"] is not None
+        and len(stats_diag["var_history"]) == 4)
+    results["var max hit"] = bool(stats_low["directions"] == 8 and stats_low["max_hit"])
+    results["var history finite"] = bool(all(
+        torch.isfinite(torch.tensor(value)) for _, value in stats_diag["var_history"]))
 
     sd1 = {"a": torch.tensor([1.0, 2.0]), "b": torch.tensor([3.0])}
     sd2 = {"a": torch.tensor([3.0, 4.0]), "b": torch.tensor([5.0])}
