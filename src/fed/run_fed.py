@@ -640,12 +640,12 @@ def main():
     if args.var_control == "on" or args.var_diagnose:
         if args.trainer != "zoo":
             raise SystemExit("--var-control is ZOO-only")
-        if args.catv == "on":
-            raise SystemExit("--var-control currently requires --catv off (extra forwards would pollute votes)")
         if args.local_steps <= 0:
             raise SystemExit(f"var control requires --local-steps > 0, got {args.local_steps}")
+        if args.catv == "on":
+            print("[fed] WARN var control + CATV: per-sample D varies; votes are per-forward and may be sample-weighted")
         if args.vq_rate < 1.0:
-            raise SystemExit("--vq-rate < 1 and var control are not combined yet")
+            print("[fed] WARN var control + VQ: per-client C=sum(D); per-result compression uses variable channel counts")
         if not args.var_diagnose and args.var_threshold <= 0.0:
             raise SystemExit("--var-control on requires --var-threshold > 0 (or --var-diagnose)")
         if args.var_segment_rounds < 0:
@@ -909,7 +909,10 @@ def main():
         "predictor_zero_filled_tensors": predictor_zero_filled,
         # SMELL 3 run_fed vq ADD — 上行压缩参数（rate=1 时 channels/c_dim 不生效）
         "vq_rate": args.vq_rate,
-        "vq_channels": resolve_vq_channels(args) if args.vq_rate < 1.0 else None,
+        "vq_channels": (None if (args.vq_rate < 1.0 and args.var_control == "on")
+                        else (resolve_vq_channels(args) if args.vq_rate < 1.0 else None)),
+        "vq_channels_mode": ("per_client" if (args.vq_rate < 1.0 and args.var_control == "on")
+                             else ("fixed" if args.vq_rate < 1.0 else None)),
         "vq_rescale": args.vq_rescale,
         "vq_sketch_dtype": args.vq_sketch_dtype,
         "vq_seed": args.vq_seed if args.vq_seed is not None else args.seed,
@@ -961,43 +964,75 @@ def main():
         # SMELL 3 run_fed rank_rotation END
         # SMELL 3 run_fed vq BEGIN — 每轮重建 compressor（active 子空间尺寸可能随层轮转变化）
         vq_enabled = args.vq_rate < 1.0
+        vq_var = bool(vq_enabled and args.var_control == "on")
         vq_channels = 0
         vq_c_dim = 0
         vq_actual_rate = 1.0
         vq_total_rate = 1.0
         vq = None
+        vq_max_channels = int(args.local_steps) * 16
         if vq_enabled:
-            vq_channels = resolve_vq_channels(args)
-            # SMELL 3 run_fed vq_per_result MODIFIED — 每条训练结果单独上传：c_dim=rate*dense，
-            # 不再除以 channel 数；总 sketch = C*c_dim（相对单条 dense delta 是 C*rate 倍）。
+            # SMELL 3 run_fed vq_per_result MODIFIED — 每条训练结果单独上传：c_dim=rate*dense。
             vq_c_dim = max(1, int(args.vq_rate * comm_params))
             vq_actual_rate = vq_c_dim / float(comm_params)
-            vq_total_rate = vq_channels * vq_c_dim / float(comm_params)
-            vq = CountSketch(comm_params, vq_channels, vq_c_dim,
-                             seed=(args.vq_seed if args.vq_seed is not None else args.seed),
-                             device=model.device)
-            if round_idx == 0:
-                seed_payload = {
-                    "round": round_idx,
-                    "active_dim": comm_params,
-                    "channels": vq_channels,
-                    "c_dim": vq_c_dim,
-                    "actual_rate": vq_actual_rate,
-                    "total_ratio_elements": vq_total_rate,
-                    "sketch_dtype": args.vq_sketch_dtype,
-                    "bytes_per_element": resolve_vq_bytes_per_element(args),
-                    "seed": args.vq_seed if args.vq_seed is not None else args.seed,
-                    "hash_seeds": vq.hash_seeds,
-                    "sigma_seeds": vq.sigma_seeds,
-                }
-                (out_dir / "vq_seeds.json").write_text(
-                    json.dumps(seed_payload, indent=2), encoding="utf-8")
-            print(f"[fed] vq round {round_idx} rate={args.vq_rate} channels={vq_channels} "
-                  f"c_dim={vq_c_dim} active_dim={comm_params} per_result={vq_actual_rate:.6f} "
-                  f"total_ratio={vq_total_rate:.4f} sketch={args.vq_sketch_dtype} "
-                  f"bytes/elem={resolve_vq_bytes_per_element(args)}")
+            if vq_var:
+                # VAR ON：每条 client 的结果数 = sum(D)，C_i 逐 client 变化。
+                # seed 序列按 max_channels=128 生成；C_i 使用其前缀。
+                seed_compressor = CountSketch(
+                    comm_params, vq_max_channels, vq_c_dim,
+                    seed=(args.vq_seed if args.vq_seed is not None else args.seed),
+                    device=model.device)
+                if round_idx == 0:
+                    seed_payload = {
+                        "round": round_idx,
+                        "active_dim": comm_params,
+                        "channels": "per_client",
+                        "max_channels": vq_max_channels,
+                        "c_dim": vq_c_dim,
+                        "actual_rate": vq_actual_rate,
+                        "sketch_dtype": args.vq_sketch_dtype,
+                        "bytes_per_element": resolve_vq_bytes_per_element(args),
+                        "seed": args.vq_seed if args.vq_seed is not None else args.seed,
+                        "hash_seeds": seed_compressor.hash_seeds,
+                        "sigma_seeds": seed_compressor.sigma_seeds,
+                    }
+                    (out_dir / "vq_seeds.json").write_text(
+                        json.dumps(seed_payload, indent=2), encoding="utf-8")
+                print(f"[fed] vq round {round_idx} rate={args.vq_rate} channels=per_client "
+                      f"max_channels={vq_max_channels} c_dim={vq_c_dim} active_dim={comm_params} "
+                      f"per_result={vq_actual_rate:.6f} sketch={args.vq_sketch_dtype} "
+                      f"bytes/elem={resolve_vq_bytes_per_element(args)}")
+            else:
+                vq_channels = resolve_vq_channels(args)
+                vq_total_rate = vq_channels * vq_c_dim / float(comm_params)
+                vq = CountSketch(comm_params, vq_channels, vq_c_dim,
+                                 seed=(args.vq_seed if args.vq_seed is not None else args.seed),
+                                 device=model.device)
+                if round_idx == 0:
+                    seed_payload = {
+                        "round": round_idx,
+                        "active_dim": comm_params,
+                        "channels": vq_channels,
+                        "c_dim": vq_c_dim,
+                        "actual_rate": vq_actual_rate,
+                        "total_ratio_elements": vq_total_rate,
+                        "sketch_dtype": args.vq_sketch_dtype,
+                        "bytes_per_element": resolve_vq_bytes_per_element(args),
+                        "seed": args.vq_seed if args.vq_seed is not None else args.seed,
+                        "hash_seeds": vq.hash_seeds,
+                        "sigma_seeds": vq.sigma_seeds,
+                    }
+                    (out_dir / "vq_seeds.json").write_text(
+                        json.dumps(seed_payload, indent=2), encoding="utf-8")
+                print(f"[fed] vq round {round_idx} rate={args.vq_rate} channels={vq_channels} "
+                      f"c_dim={vq_c_dim} active_dim={comm_params} per_result={vq_actual_rate:.6f} "
+                      f"total_ratio={vq_total_rate:.4f} sketch={args.vq_sketch_dtype} "
+                      f"bytes/elem={resolve_vq_bytes_per_element(args)}")
         # SMELL 3 run_fed vq END
         # SMELL 3 run_fed var_segment BEGIN — Method A r10/r20 探针：8 clients × 8 samples，不更新模型
+        # 探针必须看到本轮将使用的 CATV mask（组合实验），但不收集 votes。
+        base_config.consensus_mask = consensus_mask
+        base_config.vote_callback = None
         var_probe_record = None
         if (args.var_control == "on" and not args.var_diagnose
                 and args.var_segment_rounds > 0 and round_idx > 0
@@ -1124,15 +1159,27 @@ def main():
             vq_cos = None
             vq_delta_norm = None
             vq_client_bytes = 0
+            vq_client_channels = 0
             if vq_enabled:
+                if vq_var:
+                    vq_client_channels = int(result.get("var_total_samples") or 0)
+                    assert vq_client_channels > 0, (
+                        f"var+VQ client {name} has 0 training results")
+                    client_vq = CountSketch(
+                        comm_params, vq_client_channels, vq_c_dim,
+                        seed=(args.vq_seed if args.vq_seed is not None else args.seed),
+                        device=model.device)
+                else:
+                    client_vq = vq
+                    vq_client_channels = vq_channels
                 _, flat = flatten_delta(client_delta, active_index)
                 flat = flat.to(device=model.device, dtype=torch.float32)
                 target_norm = float(flat.norm())
-                sketch = vq.compress(flat)
+                sketch = client_vq.compress(flat)
                 # SMELL 3 run_fed vq_bf16 ADD — 模拟上行 cast；内部 bucket 累加仍是 fp32
                 if args.vq_sketch_dtype == "bf16":
                     sketch = sketch.to(torch.bfloat16).float()
-                flat_hat = vq.decompress(sketch)
+                flat_hat = client_vq.decompress(sketch)
                 vq_cos = CountSketch.cosine(flat, flat_hat)
                 if args.vq_rescale == "on" and target_norm > 0.0:
                     hat_norm = float(flat_hat.norm())
@@ -1140,7 +1187,7 @@ def main():
                         flat_hat = flat_hat * (target_norm / hat_norm)
                 client_delta = scatter_delta(flat_hat.cpu(), client_delta, active_index)
                 vq_delta_norm = delta_norm(client_delta)
-                vq_client_bytes = vq.sketch_bytes(resolve_vq_bytes_per_element(args))
+                vq_client_bytes = vq_client_channels * vq_c_dim * resolve_vq_bytes_per_element(args)
             # SMELL 3 run_fed vq END
             deltas.append(client_delta)
             counts.append(num_samples)
@@ -1159,6 +1206,7 @@ def main():
                 "vq_cos": vq_cos,
                 "vq_delta_norm": vq_delta_norm,
                 "vq_client_bytes": vq_client_bytes,
+                "vq_channels": vq_client_channels,
                 # SMELL 3 run_fed var_control ADD — per-sample D/var_norm/hit_low/hit_high
                 "var_D": result.get("var_D"),
                 "var_D_mean": result.get("var_D_mean"),
@@ -1212,21 +1260,26 @@ def main():
         vq_cos_values = [stats["vq_cos"] for stats in client_stats.values()
                          if stats.get("vq_cos") is not None]
         vq_bytes_per_element = resolve_vq_bytes_per_element(args)
+        vq_channels_all = [stats["vq_channels"] for stats in client_stats.values()
+                           if stats.get("vq_channels") is not None]
+        vq_channels_mean = (sum(vq_channels_all) / len(vq_channels_all)) if vq_channels_all else 0
         vq_communication_bytes = (
-            len(client_names) * vq_channels * vq_c_dim * vq_bytes_per_element
+            sum(stats["vq_client_bytes"] for stats in client_stats.values())
             if vq_enabled else 0)
         dense_all_results_communication_bytes = (
-            len(client_names) * vq_channels * comm_params * bytes_per_param
+            sum(stats["vq_channels"] * comm_params * bytes_per_param
+                for stats in client_stats.values())
             if vq_enabled else 0)
         # 每条训练结果单独压缩：ratio_elements/ratio_bytes 是单条口径；
-        # total_* 是相对“只发一条 dense delta”的总量（= C × 单条）。
+        # total_* 是相对“只发一条 dense delta”的总量（= mean C × 单条）。
         vq_ratio_elements = (vq_c_dim / float(comm_params)) if vq_enabled else None
-        vq_total_ratio_elements = (vq_channels * vq_ratio_elements) if vq_enabled else None
+        vq_total_ratio_elements = (
+            vq_channels_mean * vq_ratio_elements if vq_enabled else None)
         vq_ratio_bytes = (
             vq_c_dim * vq_bytes_per_element / float(comm_params * bytes_per_param)
             if vq_enabled else None)
         vq_total_ratio_bytes_vs_one_delta = (
-            vq_channels * vq_ratio_bytes if vq_enabled else None)
+            vq_channels_mean * vq_ratio_bytes if vq_enabled else None)
         # SMELL 3 run_fed var_control ADD — 跨 client/sample 的 D、var_norm、hit 汇总
         var_D_all = [d for stats in client_stats.values() for d in (stats.get("var_D") or [])]
         var_total_all = [stats["var_total_samples"] for stats in client_stats.values()
@@ -1261,7 +1314,9 @@ def main():
             # SMELL 3 run_fed vq ADD — Count Sketch 压缩口径（rate=1 时字段为 None/0）
             "vq_enabled": vq_enabled,
             "vq_rate": args.vq_rate,
-            "vq_channels": vq_channels if vq_enabled else None,
+            "vq_channels": vq_channels_mean if vq_enabled else None,
+            "vq_channels_min": min(vq_channels_all) if vq_channels_all else None,
+            "vq_channels_max": max(vq_channels_all) if vq_channels_all else None,
             "vq_c_dim": vq_c_dim if vq_enabled else None,
             "vq_active_dim": comm_params if vq_enabled else None,
             "vq_actual_rate": vq_actual_rate if vq_enabled else None,

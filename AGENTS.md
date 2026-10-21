@@ -87,6 +87,8 @@ $PY src/fed/run_fed.py --arch opt --tag a01 --gpu 2 \
 - `--vq-sketch-dtype {bf16,fp32}` 默认 **bf16**（内部 bucket 累加仍 fp32，传输前 cast）；`--vq-bytes-per-element 0` = auto（bf16=2B，fp32=4B）。
 - **rate 口径 = per-result**：`c_dim = max(1, floor(rate * d_active))`，**不除以 channel 数**。`--vq-rate` 默认 1=off。
 - **C = `local_steps * zo_directions`** = 本轮训练结果数（每条结果 1 channel；`--vq-channels` 仅诊断覆盖）。总 sketch = `C*c_dim`；相对“只发一条 dense delta”的总量 = `C*rate`（每条结果都上传，故总量是 C 倍）。
+- **VAR ON + VQ**：`C_i = sum(D)`（该 client 本轮实际结果数，逐 client 变化）；`c_dim=rate*d` 不变；每 client 单独构造 compressor；round metrics 记 `vq_channels_mean/min/max`，`dense_all_results_communication_bytes` 按 `sum C_i` 计；`vq_seeds.json` 用 `max_channels=128` 的前缀 seed。
+- **VAR ON + CATV**：votes 仍按每个 forward 累加；D 大的 sample 权重更大，组合实验只作系统评测，不是干净 CATV 消融。
 - **每个 channel 独立 hash/sign seed，所有 client 共享同一 seed 序列**（`--vq-seed` 默认 `--seed`）；`vq_seeds.json` 落盘。不要改成 C 个 channel 完全同 hash：那会退化成一个 `c_dim` sketch。
 - **clip 顺序：先按现有 `--delta-clip` 对完整 delta 做全局 L2 clip，再 VQ**；server 解压后默认 `--vq-rescale on` 缩放到 clip 后范数。当前实现用 C-channel sketch 压缩最终 delta，数学上等价于逐结果 sketch 后 server 求和；clip 仍在最终 delta 上（未做 per-result clip）。
 - **fidelity**：单条结果 `cos≈√(rate/(1+rate))`；C 条聚合后 `cos≈√(C*rate/(1+C*rate))`。C=64、rate 0.5 → 理论 0.985；`vq_cos_mean` 是**聚合后**口径，不能反推 per-result rate。rate=1 直接绕过 VQ，基线逐位不变。
@@ -115,6 +117,7 @@ $PY src/fed/run_fed.py --arch distilbert --tag a01 --gpu 0 --trainer zoo \
 - **Method A 分段**：r0–r9 用 T0；r10/r20 各跑 **8 clients × 8 samples** 探针（固定 global model、不更新、cycle 当前 cursor），用 raw var 选 T10/T20（mean D≤8 最接近 8）；写 `var_probe_roundNNN.jsonl` / `var_thresholds.json`。`--var-segment-rounds 10`、`--var-probe-clients 8`。
 - **CLI**：`--var-control {on,off}` 默认 off；`--var-threshold` 默认 **0.587230920791626**（T0）；`--var-diagnose` 仅标定用。
 - **正式**：BERT a03、CATV off、VQ off、L=8、r30、eval 500；基线 a03 off r29 = **1.588699 / 0.466**。run：`logs/fed/bert_var_methoda_a03_r30/`；归档：`checkpoints/distilbert_var_methoda_a03_r30/`。
+- **组合系统评测（挂在其后）**：VAR ON + CATV ON + VQ 0.5 bf16，BERT a03、L8、r30；chain `temp/run_chain_methoda_to_combo_bg.sh`，run `logs/fed/bert_var_catv_vq_a03_r30/`，archive `checkpoints/distilbert_var_catv_vq_a03_r30/`。CATV votes 按 forward 计权（D 变）；VQ `C_i=sum(D)`。
 - **旧 pool VAR（诊断）**：r29 1.590681 / 0.462 vs 基线 1.588699 / 0.466（Δ +0.001982，p=0.0739）；平均 samples 91.9；归档 `checkpoints/distilbert_var_a03_r30/`。不作最终结果。
 - **风险**：raw var 非单调，D=4 可能假早停（标定 51% hit_low）；探针只有 8 clients，T10/T20 有噪声。若段末 D_mean 明显偏离 8 或 hit_low/high 过多，再讨论 patience / min D=6。
 - 详见 `docs/ailog/261021-111547-smell-v3-var-segmented-threshold-method-a.md`。

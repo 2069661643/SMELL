@@ -139,6 +139,14 @@ class ClientRunner:
 
         self.model.eval()
         device = self.model.device
+        # SMELL 3 ClientRunner var_control ADD — CATV 组合：每次 forward 仍收集投票
+        vote_config = None
+        vote_accumulator = None
+        if self.collect_votes:
+            vote_config = resolve_model_config(self.model)
+            num_layers = int(getattr(vote_config, "num_hidden_layers"))
+            vote_accumulator = _VoteAccumulator(num_layers // 2 - 1, num_layers - 2)
+            vote_config.vote_callback = vote_accumulator
         names, sample_flat = flatten_trainable(self.model)
         assert names, "model has no trainable parameters"
         initial = get_trainable_state_dict(self.model)
@@ -193,13 +201,15 @@ class ClientRunner:
             if self.var_diagnose:
                 all_histories.append(history)
 
+        if vote_config is not None:
+            vote_config.vote_callback = None
         final = get_trainable_state_dict(self.model)
         delta = {name: final[name] - initial[name] for name in initial}
         ds = [item["D"] for item in sample_stats]
         norms = [item["var_norm"] for item in sample_stats]
         fork_norms = [item["var_fork_norm"] for item in sample_stats]
         raws = [item["var"] for item in sample_stats]
-        return {
+        result = {
             "state_dict": final,
             "delta": delta,
             "train_loss": (sum(losses) / len(losses)) if losses else None,
@@ -219,6 +229,9 @@ class ClientRunner:
             "var_raw_mean": (sum(raws) / len(raws)) if raws else None,
             "var_history": all_histories if self.var_diagnose else None,
         }
+        if vote_accumulator is not None:
+            result["votes"] = vote_accumulator.average()
+        return result
     # SMELL 3 ClientRunner var_control END
 
     def run(self, input_ids_iterable):
