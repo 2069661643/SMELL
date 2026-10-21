@@ -48,8 +48,9 @@ def parse_args():
     # SMELL 3 run_fed catv args ADD — CATV anchor ratio r（默认 sparse/2）与投票归一化方式
     parser.add_argument("--catv-r", type=float, default=None,
                         help="CATV anchor ratio r; default None => sparse/2 (requires r < s and s + r <= 1)")
-    parser.add_argument("--catv-normalize", choices=("off", "sum"), default="off",
-                        help="off = raw summed votes (paper); sum = each client per-layer vote / its sum (v2 legacy)")
+    parser.add_argument("--catv-normalize", choices=("off", "sum", "client"), default="client",
+                        help="off = raw votes (paper); sum = per-layer signed sum (legacy); "
+                             "client = per-layer L1, each client equal weight (default)")
     parser.add_argument("--sparse", type=float, default=0.4)
     # SMELL 3 run_fed dtype_attn ADD — 注意力后端与权重精度：fp32+sdpa_prune 用于 ZOO 精度修复 + Jenga 真语义稀疏
     parser.add_argument("--attn", choices=("flash", "eager", "sdpa", "sdpa_prune", "sdpa_gather"),
@@ -1229,6 +1230,13 @@ def main():
                         layer: (tensor / tensor.sum() if float(tensor.sum()) != 0.0 else tensor)
                         for layer, tensor in votes.items()
                     }
+                elif args.catv_normalize == "client":
+                    # SMELL 3 run_fed catv_vote_client ADD — 每 client 每层 L1 归一化，client 间等权
+                    normalized = {}
+                    for layer, tensor in votes.items():
+                        denom = float(tensor.abs().sum())
+                        normalized[layer] = tensor / denom if denom > 0.0 else tensor
+                    votes = normalized
                 round_vote_sum = ServerAggregator.accumulate_votes(round_vote_sum, votes)
                 client_votes[name] = votes
 
@@ -1315,6 +1323,7 @@ def main():
             "vq_enabled": vq_enabled,
             "vq_rate": args.vq_rate,
             "vq_channels": vq_channels_mean if vq_enabled else None,
+            "vq_channels_mean": vq_channels_mean if vq_enabled else None,
             "vq_channels_min": min(vq_channels_all) if vq_channels_all else None,
             "vq_channels_max": max(vq_channels_all) if vq_channels_all else None,
             "vq_c_dim": vq_c_dim if vq_enabled else None,

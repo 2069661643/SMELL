@@ -128,7 +128,7 @@ $PY src/fed/run_fed.py --arch distilbert --tag a01 --gpu 0 --trainer zoo \
 - **bf16 损失量化会吞掉 ZOO 信号**（~1e-6 ≪ 0.0156 台阶）；正式训练用 `--dtype fp32 --attn sdpa_prune`（FA2 只支持 bf16/fp16）。16k fp32 前向 ~2.9s、BP ~13s/样本。
 - **predictor 必须加载**：OPT 用 step5（`step5_a01a03_clients_causal`），BERT 用 `predictor_bert/a01_warmup_400step`；随机 predictor 的 PPL 不能作质量依据。推理侧 predictor bias 由加载器零填充，其余缺 key 硬报错。
 - `--delta-clip` 是逐 client 全局 L2 裁剪，**不是梯度裁剪**；OPT raw norm 可达 1e6，clip=13.34；BERT clip=1.0。重尾离群见 `260929-111500`。
-- CATV：`r < s` 且 `s+r <= 1`（默认 `r=s/2`）；BERT 必须 `keep_block0=True`；投票用 NaN-aware valid-mean（`261014-111800`），否则 pad 占位符会让掩码冻结。
+- CATV：`r < s` 且 `s+r <= 1`（默认 `r=s/2`）；BERT 必须 `keep_block0=True`；投票用 NaN-aware valid-mean（`261014-111800`），否则 pad 占位符会让掩码冻结。**归一化默认 `--catv-normalize client`**（每 client 每层 L1，client 间等权）；旧 CATV 消融用 `off`（raw paper）；VAR 下必须用 `client`，否则 D 大的 client 权重大。
 - `--arch distilbert` 只支持 `sdpa/sdpa_prune`；`--act-pack` 仅 OPT；`--lora-r 1 --lora-alpha 2` 是正式口径（默认 r=8 只用于一般实验）。
 - `--doc-order cycle` 是修复固定语料的协议；新长跑必须显式加上，否则每 client 只重复前 L 篇。
 - 读结果以 `metrics.jsonl` 为准（driver.log 有块缓冲）；`config.json` 落盘实际生效参数。

@@ -21,8 +21,11 @@
    - `vq_seeds.json`：`channels="per_client"`、`max_channels=128`，per-client C_i 使用前缀 seed。
 3. **CATV + VAR**：`_run_zoo_var_per_sample` 现在安装 vote callback（每次 forward 仍投票）；
    probe 不收集 votes，并在 probe 前设置本轮 `consensus_mask`。
-   - 注意：D 逐 sample 变化 → 投票按 forward 加权，D 大的 sample 权重更大；此组合只作系统评测，
-     不是干净 CATV 消融。
+4. **vote 逐 client 归一化**：`--catv-normalize client`（默认）对每个 client 的每层 vote 做
+   **L1 归一化**，server 再求和 → 每个 client 等权。`off` 保留旧 paper raw 口径，`sum` 为 v2 legacy
+   的 signed-sum。旧 CATV 消融是 `off`，不回改；组合 run 用 `client`。
+   - D 逐 sample 变化只会影响 client 内 vote 的 averaged precision，不再改变 client 间权重；
+     但由于 forward 数不同，仍不是固定 D 的 CATV 消融。
 
 ## 三、smoke（1 client × 1 sample，2k，组合）
 
