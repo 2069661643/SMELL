@@ -1,0 +1,7 @@
+tag,variant,eval_mask,nll_r0,nll_r29,delta_nll_pct,acc_r0,acc_r29,macro_f1_r0,macro_f1_r29,delta_acc_points,delta_acc_pct,source_dir
+a01,off,none,1.691021,1.583558,6.354927,0.424,0.468,0.324439,0.35718,0.044,10.377358,logs/fed/bert_da_fixed/r30_a01_catv_off/a01
+a01,on_evaloff,evaloff,1.691021,1.576817,6.753553,0.424,0.46,0.324439,0.347359,0.036,8.490566,logs/fed/bert_da_fixed/r30_a01_catv_on/a01
+a01,on_evalon,evalon,1.752674,1.556317,11.203291,0.408,0.458,0.307654,0.339075,0.05,12.254902,logs/fed/bert_da_fixed/r30_a01_catv_on/a01
+a03,off,none,1.690632,1.588699,6.029288,0.426,0.466,0.325973,0.355833,0.04,9.389671,logs/fed/bert_da_fixed/r30_a03_catv_off/a03
+a03,on_evaloff,evaloff,1.690632,1.577225,6.707981,0.426,0.462,0.325973,0.345002,0.036,8.450704,logs/fed/bert_da_fixed/r30_a03_catv_on/a03
+a03,on_evalon,evalon,1.751061,1.548441,11.571286,0.41,0.454,0.312073,0.339214,0.044,10.731707,logs/fed/bert_da_fixed/r30_a03_catv_on/a03

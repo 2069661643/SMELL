@@ -1,0 +1,8 @@
+comparison,tag,a_run,b_run,a_round,b_round,field,n,mean_delta_nll,sd,se,t,p_two_sided,p_normal_approx,exp_delta_nll,ci95_low,ci95_high,verdict
+vq_vs_catv_off_r29,a03,r30_a03_catv_off,vq_perresult,29,29,nll,500,-0.001618,0.014981,0.00067,-2.415588,0.016068,0.01571,0.998383,-0.002931,-0.000305,IMPROVED
+var_vs_catv_off_r29,a03,r30_a03_catv_off,var_methoda,29,29,nll,500,-0.004248,0.022439,0.001004,-4.232858,2.746981e-05,2.307407e-05,0.995761,-0.006215,-0.002281,IMPROVED
+combo_vs_catv_on_r29,a03,r30_a03_catv_on,combo,29,29,nll,500,0.011398,0.057443,0.002569,4.436704,1.124852e-05,9.134691e-06,1.011463,0.006363,0.016433,REGRESSED
+combo_vs_catv_off_r29,a03,r30_a03_catv_off,combo,29,29,nll,500,-0.028861,0.312793,0.013989,-2.063157,0.039614,0.039098,0.971552,-0.056278,-0.001443,IMPROVED
+combo_evaloff_vs_catv_on_evaloff_r29,a03,r30_a03_catv_on(evaloff),combo(evaloff),29,29,nll,500,0.000506,0.033348,0.001491,0.338994,0.734757,0.734614,1.000506,-0.002417,0.003429,NOT-SIGNIFICANT
+combo_mask_effect_r29,a03,combo(evaloff),combo(evalon),29,29,nll,500,-0.017892,0.370125,0.016552,-1.080918,0.280256,0.279734,0.982267,-0.050335,0.014551,NOT-SIGNIFICANT
+combo_evaloff_vs_catv_off_r29,a03,r30_a03_catv_off,combo(evaloff),29,29,nll,500,-0.010969,0.167037,0.00747,-1.468338,0.142643,0.142013,0.989091,-0.02561,0.003673,NOT-SIGNIFICANT

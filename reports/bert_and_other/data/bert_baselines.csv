@@ -1,0 +1,4 @@
+baseline,n,tag,attn,sparse,catv_mask,nll,accuracy,macro_f1,source_file,note
+step1_final_global500,500,a01,sdpa,,,1.594651,0.454,0.351092,temp/eval_step1_16k_final.json,Step1 最终头；dense 推理；r30 的初始化/上下文锚点
+step1_best_global500,500,a01,sdpa,,,1.493738,0.442,0.33342,temp/eval_step1_16k_best.json,Step1 best 头；仅作备选锚点，未用于正式链
+frozen_dense_250_subset,250,a01,sdpa,,,1.531709,0.488,0.359426,temp/eval_baseline_250.json,冻结 Step1 头在前 250 个 global_test 样本；LD/BP 表的共同 250 样本锚点

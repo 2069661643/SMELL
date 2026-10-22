@@ -1,0 +1,6 @@
+run_id,trainer,attn,sparse,doc_order,local_steps,zo_directions,lr,rounds,eval_n,nll_r0,nll_last,delta_nll_pct,acc_r0,acc_last,delta_acc_points,delta_acc_pct,err_reduction_pct,mean_round_seconds,wall_hours,nll_pct_per_hour,mean_delta_norm,clipped_clients_total,source_dir
+dense_L8_lr3e4_r10,bp,sdpa,0.4,cycle,8,8,0.0003,10,250,1.528942,1.395443,8.731441,0.484,0.536,0.052,10.743802,10.077519,108.326421,0.487585,17.90754,0.230065,0,logs/fed/bert_bp_ref_cycle/dense_L8_lr3e4_r10/a01
+dense_L8_lr1e3_r10,bp,sdpa,0.4,cycle,8,8,0.001,10,250,1.525927,1.533402,-0.489857,0.504,0.568,0.064,12.698413,12.903226,108.051576,0.485771,-1.008411,0.673239,2,logs/fed/bert_bp_ref_cycle/dense_L8_lr1e3_r10/a01
+sparse_L8_lr3e4_r10,bp,sdpa_prune,0.4,cycle,8,8,0.0003,10,250,1.711249,1.461707,14.582435,0.448,0.508,0.06,13.392857,10.869565,67.424148,0.311296,46.844212,0.243049,0,logs/fed/bert_bp_ref_cycle/sparse_L8_lr3e4_r10/a01
+dense_L8_lr3e4_r5,bp,sdpa,0.4,cycle,8,8,0.0003,5,250,1.528926,1.472105,3.716401,0.484,0.52,0.036,7.438017,6.976744,108.441778,0.233548,15.912826,0.22778,0,logs/fed/bert_bp_ref_cycle/dense_L8_lr3e4_r5/a01
+dense_L2_lr3e4_r20,bp,sdpa,0.4,cycle,2,8,0.0003,20,250,1.531142,1.506369,1.617967,0.488,0.512,0.024,4.918033,4.6875,27.423798,0.546598,2.960068,0.088814,0,logs/fed/bert_bp_ref_cycle/dense_L2_lr3e4_r20/a01

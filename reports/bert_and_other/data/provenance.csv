@@ -1,0 +1,31 @@
+group,run_id,role,raw_path,doc_order,rounds,eval_n,status,note
+r30_four_arm,r30_a01_catv_off,headline,logs/fed/bert_da_fixed/r30_a01_catv_off/a01,cycle,30,500,USE,CATV 四臂消融；eval-off 文件在同目录
+r30_four_arm,r30_a01_catv_on,headline,logs/fed/bert_da_fixed/r30_a01_catv_on/a01,cycle,30,500,USE,CATV 四臂消融；eval-off 文件在同目录
+r30_four_arm,r30_a03_catv_off,headline,logs/fed/bert_da_fixed/r30_a03_catv_off/a03,cycle,30,500,USE,CATV 四臂消融；eval-off 文件在同目录
+r30_four_arm,r30_a03_catv_on,headline,logs/fed/bert_da_fixed/r30_a03_catv_on/a03,cycle,30,500,USE,CATV 四臂消融；eval-off 文件在同目录
+bp_cycle,dense_L8_lr3e4_r10,reference,logs/fed/bert_bp_ref_cycle/dense_L8_lr3e4_r10/a01,cycle,10,250,USE_REFERENCE,BP 参考系；250 样本评测；不与 r30 绝对 NLL 混用
+bp_cycle,dense_L8_lr1e3_r10,reference,logs/fed/bert_bp_ref_cycle/dense_L8_lr1e3_r10/a01,cycle,10,250,USE_REFERENCE,BP 参考系；250 样本评测；不与 r30 绝对 NLL 混用
+bp_cycle,sparse_L8_lr3e4_r10,reference,logs/fed/bert_bp_ref_cycle/sparse_L8_lr3e4_r10/a01,cycle,10,250,USE_REFERENCE,BP 参考系；250 样本评测；不与 r30 绝对 NLL 混用
+bp_cycle,dense_L8_lr3e4_r5,reference,logs/fed/bert_bp_ref_cycle/dense_L8_lr3e4_r5/a01,cycle,5,250,USE_REFERENCE,BP 参考系；250 样本评测；不与 r30 绝对 NLL 混用
+bp_cycle,dense_L2_lr3e4_r20,reference,logs/fed/bert_bp_ref_cycle/dense_L2_lr3e4_r20/a01,cycle,20,250,USE_REFERENCE,BP 参考系；250 样本评测；不与 r30 绝对 NLL 混用
+ld_grid,L8D4,main,logs/fed/bert_ld/L8D4/a01,cycle,6,250,USE_CONTROL,L×D 网格/对照；250 样本评测
+ld_grid,L8D8,main,logs/fed/bert_ld/L8D8/a01,cycle,6,250,USE_CONTROL,L×D 网格/对照；250 样本评测
+ld_grid,fixed_L8D8,control_fixed_order,logs/fed/bert_ld/fixed_L8D8/a01,fixed,6,250,USE_CONTROL,L×D 网格/对照；250 样本评测
+ld_grid,L16D4,main,logs/fed/bert_ld/L16D4/a01,cycle,6,250,USE_CONTROL,L×D 网格/对照；250 样本评测
+ld_grid,L16D8,main,logs/fed/bert_ld/L16D8/a01,cycle,6,250,USE_CONTROL,L×D 网格/对照；250 样本评测
+ld_grid,L8D16,main,logs/fed/bert_ld/L8D16/a01,cycle,6,250,USE_CONTROL,L×D 网格/对照；250 样本评测
+ld_grid,L8D8_lr2x,main,logs/fed/bert_ld/L8D8_lr2x/a01,cycle,6,250,USE_CONTROL,L×D 网格/对照；250 样本评测
+ld_grid,dense_L8D8,anchor_dense,logs/fed/bert_ld/dense_L8D8/a01,cycle,6,250,USE_CONTROL,L×D 网格/对照；250 样本评测
+ld_grid,B1_L8D4_r5,control_iso_corpus,logs/fed/bert_ld/B1_L8D4_r5/a01,cycle,5,250,USE_CONTROL,L×D 网格/对照；250 样本评测
+ld_grid,B2_L2D4_r20,control_iso_corpus,logs/fed/bert_ld/B2_L2D4_r20/a01,cycle,20,250,USE_CONTROL,L×D 网格/对照；250 样本评测
+lr_scan,lr1.4e-3,calibration,logs/fed/bert_lr_scan/lr1.4e-3/a01,cycle,3,,USE_CALIBRATION,无 eval；仅 train_loss/delta
+lr_scan,lr1e-2,calibration,logs/fed/bert_lr_scan/lr1e-2/a01,cycle,3,,USE_CALIBRATION,无 eval；仅 train_loss/delta
+lr_scan,lr2.8e-3,calibration,logs/fed/bert_lr_scan/lr2.8e-3/a01,cycle,3,,USE_CALIBRATION,无 eval；仅 train_loss/delta
+lr_scan,lr4e-3,calibration,logs/fed/bert_lr_scan/lr4e-3/a01,cycle,3,,USE_CALIBRATION,无 eval；仅 train_loss/delta
+lr_scan,lr5e-4,calibration,logs/fed/bert_lr_scan/lr5e-4/a01,cycle,3,,USE_CALIBRATION,无 eval；仅 train_loss/delta
+technique,bert_vq050_bf16_perresult_a03,headline,logs/fed/bert_vq050_bf16_perresult_a03/a03,cycle,30,500,USE,VQ/VAR/组合系统线
+technique,bert_var_methoda_a03_r30,headline,logs/fed/bert_var_methoda_a03_r30/a03,cycle,30,500,USE,VQ/VAR/组合系统线
+technique,bert_var_catv_vq_a03_r30_rerun,headline,logs/fed/bert_var_catv_vq_a03_r30_rerun/a03,cycle,30,500,USE,VQ/VAR/组合系统线
+baseline,step1_final_global500,anchor,temp/eval_step1_16k_final.json,n/a,0,,USE_ANCHOR,冻结权重锚点
+baseline,step1_best_global500,anchor,temp/eval_step1_16k_best.json,n/a,0,,USE_ANCHOR,冻结权重锚点
+baseline,frozen_dense_250_subset,anchor,temp/eval_baseline_250.json,n/a,0,,USE_ANCHOR,冻结权重锚点

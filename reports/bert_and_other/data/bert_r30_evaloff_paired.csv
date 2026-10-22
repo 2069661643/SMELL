@@ -1,0 +1,9 @@
+comparison,tag,a_run,b_run,a_round,b_round,field,n,mean_delta_nll,sd,se,t,p_two_sided,p_normal_approx,exp_delta_nll,ci95_low,ci95_high,verdict
+weight_effect,a01,r30_a01_catv_off,r30_a01_catv_on,29,29,nll,500,-0.006741,0.162737,0.007278,-0.92622,0.354779,0.354332,0.993282,-0.021005,0.007524,NOT-SIGNIFICANT
+mask_effect,a01,r30_a01_catv_on(evaloff),r30_a01_catv_on(evalon),29,29,nll,500,-0.020501,0.345283,0.015442,-1.327635,0.184906,0.184299,0.979708,-0.050766,0.009765,NOT-SIGNIFICANT
+total_effect,a01,r30_a01_catv_off,r30_a01_catv_on,29,29,nll,500,-0.027242,0.281454,0.012587,-2.164258,0.030918,0.030445,0.973126,-0.051912,-0.002571,IMPROVED
+start_check,a01,r30_a01_catv_off,r30_a01_catv_on(evaloff),0,0,nll,500,0,0,0,0,1,1,1,0,0,NOT-SIGNIFICANT
+weight_effect,a03,r30_a03_catv_off,r30_a03_catv_on,29,29,nll,500,-0.011474,0.180757,0.008084,-1.419426,0.156399,0.155775,0.988591,-0.027318,0.00437,NOT-SIGNIFICANT
+mask_effect,a03,r30_a03_catv_on(evaloff),r30_a03_catv_on(evalon),29,29,nll,500,-0.028784,0.368251,0.016469,-1.747801,0.081114,0.080499,0.971626,-0.061063,0.003495,NOT-SIGNIFICANT
+total_effect,a03,r30_a03_catv_off,r30_a03_catv_on,29,29,nll,500,-0.040258,0.298098,0.013331,-3.019808,0.002659,0.002529,0.960541,-0.066388,-0.014129,IMPROVED
+start_check,a03,r30_a03_catv_off,r30_a03_catv_on(evaloff),0,0,nll,500,0,0,0,0,1,1,1,0,0,NOT-SIGNIFICANT

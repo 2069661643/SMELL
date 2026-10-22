@@ -3,7 +3,7 @@
 > **你的角色：SMELL-v3 实验 Agent。** 仓库有 3 类 checkout：云端 **A40×4（host `amax`）**、**AutoDL 1×RTX 4090 24G**（本 checkout：`/root/smell/SMELL`）、WSL（8GB RTX 5060，只做 ≤4k smoke）。
 > **开工先跑 `hostname` + `git branch --show-current`**：
 > - 主实验线 `exp/distilbert-16k` @ `37e5708`（261020）；`main` 已 fast-forward 到同一提交并 push 到 `origin/main`。
-> - VQ 线 `exp/vq-compression`（从 `37e5708` 拉出，已 push）；`exp/rank-rotation-lora` 是祖先/旧线。
+> - 当前 checkout 在 **`exp/vq-compression`**（261022，VQ/VAR/CATV 阶段交接）；HEAD 以 `git log -1` 为准；`exp/rank-rotation-lora` 是祖先/旧线。
 > - `origin/main` 与 `origin/exp/distilbert-16k` 均已同步到 `37e5708`；`main` 不再是 260924 旧快照。
 
 ## 项目与方向
@@ -27,7 +27,7 @@ src/        新代码全部写这里（third_party 只读，允许 COPY 进 src/
   eval/     ppl.py、classify.py   bench/memory.py   hello_world.py(环境自检)
 scripts/    setup_server.sh、run_ablation_cloud.sh、hello-world.sh、diag_cos_*.py、paired_eval.py
 third_party/ 只读 submodule：FwdLLM / Jenga(OPT+数据+权重) / VQ(Count Sketch)
-reports/    交付包（git 跟踪）：reports/opt/ = OPT 图/表/报告，入口 make_report.py
+reports/    交付包（git 跟踪）：reports/opt/ = OPT 图/表/报告；reports/bert_and_other/ = BERT 自循环修复后（cycle）CSV+README（无图）；入口各自 make_report.py
 docs/       standard.md、weight-manifest.md、ailog/、paper/evaluation/redundancy/、old_ailog/、reference/(gitignore)
 dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 ```
@@ -35,20 +35,30 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 - `third_party/FwdLLM/FedML` 是 1168 个**已跟踪普通文件**（非真子模块），递归 clone 不必再拉 FedML。
 - 数据：`dataset_v3/discovery_16k/{a01,a03}`（OPT）、`dataset_v3/arxiv_16k/{a01,a03}`（BERT），均 30 clients × (100 train + 16 local-test)、16k、α=0.1/0.3。
 
-## 当前结果（截至 261020）
+## 当前结果（截至 261022）
 
 | 线 | 协议 | 结果 | 归档 |
 |---|---|---|---|
 | OPT r30 fixed | k=24、D=32、L=2、c=30、r=30、LoRA r1/α2、lr=0.30、clip=13.34、`--doc-order cycle` | full r29 31.46–31.70 vs fresh 33.665（+5.9~6.6%）；answer r29 2292–2474；CATV a03 answer −0.093 nats（p=5e-8），a01 n.s.；CATV full 略差 | `checkpoints/opt_ablation_r30_fixed/` |
 | BERT r30 fixed | 6 层、L=8、D=8、lr=1.4e-3、clip=1.0、cycle、eval 500 | NLL r0 1.69–1.75 → r29 **1.548–1.589**；CATV on vs off 显著（a01 p=0.030 / a03 p=0.0025） | `checkpoints/distilbert_ablation_r30_fixed/` |
 | VQ | ZOO-only、per-result（`c_dim=rate*d`）、sketch 默认 bf16 | per-result 0.5 bf16 r30 完成：NLL 1.6907→**1.5871**（−6.13%），r29 vs 无 VQ 1.5887：ΔNLL **−0.0016**（p=0.0157），acc 0.466；cos 0.9945；per-result 2×（70.8 vs 141.6 MB/round），总量 32× 一条 delta | `checkpoints/distilbert_vq050_bf16_perresult_a03_r30/`；旧 total partial：`distilbert_vq025_a03_r20_partial/`、`distilbert_vq050_bf16_a03_r0_partial/` |
+| VAR Method A | per-sample raw var、D=4..16、no patience、T0/T10/T20 分段、CATV off、VQ off、cycle、eval 500 | r29 **1.584451 / 0.464**；vs a03 off 1.588699/0.466：ΔNLL **−0.004248**（p=2.3e-5）；mean D **8.79**、samples **70.3** | `checkpoints/distilbert_var_methoda_a03_r30/` |
+| 组合系统 | VAR Method A + CATV ON（`client`）+ VQ 0.5 bf16、cycle、eval 500 | r29 **1.559838 / 0.450**；vs CATV-on 基线 1.548441/0.454：**+0.0114 NLL**（p=9.1e-6）；vs CATV-off：−0.0289 NLL。eval-off vs CATV-on eval-off：**+0.000506**（p=0.735）⇒ VAR+VQ 权重等价，差距来自 mask 归一化 | `checkpoints/distilbert_var_catv_vq_a03_r30_rerun/`（含 `evaloff/`） |
 
 关键口径 caveat：
 
 - **CATV 的收益主要是推理期掩码效应**（OPT a03 answer 显著；a01 修复协议下 n.s.）；on 臂 r0 自带 mask，**不要用 r0 跨臂比较**，用 r29 配对。
-- OPT 旧「固定前 2 篇/client」缺陷已由 `--doc-order cycle` 修复；旧 fixed 协议结果不可与本表直接混用。
+- **261012 前的 BERT/OPT 结果都是「自循环样本」fixed 协议**（每轮重复前 L 篇），已由 `--doc-order cycle` 修复；论文/BERT 主表只能用 `bert_da_fixed` 及之后的 cycle run。唯一保留的 fixed 是 `bert_ld/fixed_L8D8` H2 对照。
 - BERT `checkpoints/distilbert_ablation_r30_defect/` 仅存档、禁用于论文；`keep_block0` 修复见 `261014-111800`。
 - 权重/数据 sha256 见 `docs/weight-manifest.md` §6/§7；OPT step5 predictor 与 BERT predictor 不可混用。
+
+## 结果包（reports/）
+
+- `reports/opt/make_report.py` → `reports/opt/`：OPT 图+表（论文用）。
+- `reports/bert_and_other/make_report.py` → `reports/bert_and_other/`：BERT post-cycle CSV+README，**不生成图**（图由论文 Agent 统一生成）。
+- `reports/bert_and_other/data/provenance.csv` 逐 run 列原始路径/状态；`excluded_runs.csv` 列禁用/partial/diagnostic run。
+- 两个包都由脚本自动生成，内置 ailog 对账闸门；**不要手改 CSV/README 数字**。BERT 包命令：
+  `$PY reports/bert_and_other/make_report.py`（`--no-check` 仅调试）。
 
 ## 当前运行口径
 
@@ -131,7 +141,7 @@ $PY src/fed/run_fed.py --arch distilbert --tag a01 --gpu 0 --trainer zoo \
 - `--delta-clip` 是逐 client 全局 L2 裁剪，**不是梯度裁剪**；OPT raw norm 可达 1e6，clip=13.34；BERT clip=1.0。重尾离群见 `260929-111500`。
 - CATV：`r < s` 且 `s+r <= 1`（默认 `r=s/2`）；BERT 必须 `keep_block0=True`；投票用 NaN-aware valid-mean（`261014-111800`），否则 pad 占位符会让掩码冻结。**归一化默认 `--catv-normalize client`**（每 client 每层 L1，client 间等权）；旧 CATV 消融用 `off`（raw paper）；VAR 下必须用 `client`，否则 D 大的 client 权重大。
 - `--arch distilbert` 只支持 `sdpa/sdpa_prune`；`--act-pack` 仅 OPT；`--lora-r 1 --lora-alpha 2` 是正式口径（默认 r=8 只用于一般实验）。
-- `--doc-order cycle` 是修复固定语料的协议；新长跑必须显式加上，否则每 client 只重复前 L 篇。
+- `--doc-order cycle` 是修复固定语料（自循环样本）的协议；新长跑必须显式加上，否则每 client 只重复前 L 篇。**261012 前的 fixed 结果不可与 cycle 结果混表**；BERT 主表从 `logs/fed/bert_da_fixed` 起算，`bert_ld/fixed_L8D8` 仅作 H2 对照。
 - 读结果以 `metrics.jsonl` 为准（driver.log 有块缓冲）；`config.json` 落盘实际生效参数。
 
 ## AutoDL 4090 工作机（本 checkout：`/root/smell/SMELL`）
@@ -151,7 +161,8 @@ $PY src/fed/run_fed.py --arch distilbert --tag a01 --gpu 0 --trainer zoo \
 
 ## 构建 / 静态检查 / 测试
 
-**无 CI / lint / 测试框架 / formatter**，不要引入。唯一强制静态检查是逐文件 `py_compile`：
+**无 CI / lint / 测试框架 / formatter**，不要引入。唯一强制静态检查是逐文件 `py_compile`。
+注意 `git diff --name-only` 不含未跟踪文件；新文件要显式给路径（如 `reports/bert_and_other/make_report.py`）。
 
 ```bash
 PY=~/miniconda3/envs/SMELL/bin/python   # AutoDL；amax 用 ~/applications/anaconda3/envs/smell-v3/bin/python
@@ -194,6 +205,7 @@ bash -n scripts/setup_server.sh scripts/run_ablation_cloud.sh
 ## Git / submodule
 
 - 当前 VQ 分支 `exp/vq-compression`；主实验线 `exp/distilbert-16k` 已合入本地 `main`（`37e5708`）。提交信息 `SMELL v3: <English summary>`；不要 amend 已 push 的提交；提交前跑相关 `py_compile`。
+- `reports/` 是 git 跟踪交付包；`make_report.py` 生成 CSV/README 后，提交前跑一次不带 `--no-check` 的完整对账。
 - 新机 git 身份：`git config user.name/user.email` 与历史作者一致（`git log -1 --format='%an <%ae>'`）。
 - 三个 submodule 只读；上游改动 fetch/checkout 后 `git add third_party/<x>` 更新指针，**不直接改文件**。VQ 发布 remote `github`（`2069661643/SMELL-VQ`），开发上游 `../VQ`；`git submodule sync` 会改写 origin，慎用。
 - 每次改动写 `docs/ailog/YYMMDD-HHMMSS-<desc>.md`（模板见 `docs/standard.md`）。
@@ -204,6 +216,7 @@ bash -n scripts/setup_server.sh scripts/run_ablation_cloud.sh
 |---|---|
 | `docs/weight-manifest.md`（非 ailog） | **换机交接**：权重/数据路径 + sha256 + OPT/BERT 运行 flags |
 | `docs/ailog/261022-140026-...var-vq-catv-stage-handoff.md` | **本阶段总交接**：VQ per-result / VAR Method A / CATV client / 组合 + eval-off；先读 |
+| `docs/ailog/261022-141526-...bert-post-cycle-report-package.md` | **BERT post-cycle CSV 包**：18 个 CSV、范围、62/62 对账；写论文表先看 |
 | `docs/ailog/261021-111547-...var-segmented-threshold-method-a.md` | **VAR Method A 拍板**：raw var、D=4..16、r10/r20 探针；pool 仅诊断 |
 | `docs/ailog/261021-194500-...var-catv-vq-system-eval.md` | **组合系统评测**：VAR+CATV(client)+VQ 0.5；eval-off 分解 |
 | `docs/ailog/261020-162000-...vq-per-result.md` | **VQ per-result**：`c_dim=rate*d`、`C=L*D`、bf16 |
