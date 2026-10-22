@@ -111,6 +111,9 @@ def parse_args():
     # SMELL 3 run_fed truncate ADD — smoke 用：每条训练序列只取前 N token（0 = 关闭，全长）
     parser.add_argument("--truncate", type=int, default=0, help="smoke only: train on first N tokens; 0 = full seq")
     # SMELL 3 run_fed doc_order ADD — 每轮 client 取数游标：fixed=老协议（固定前 L 篇）；cycle=逐轮轮转语料（每轮 start+=L）
+    # SMELL 3 run_fed round_offset ADD — 续训：绝对轮号从 offset 起（cycle 游标/输出编号；默认 0 = 旧行为）
+    parser.add_argument("--round-offset", type=int, default=0,
+                        help="resume: absolute round number of the first round (cycle cursor + eval/save numbering)")
     parser.add_argument("--doc-order", choices=("fixed", "cycle"), default="fixed",
                         help="client doc cursor: fixed (legacy) | cycle (rotate start by round*local_steps)")
     # SMELL 3 run_fed init-path ADD — warmup 产物初始化：位置表 + LoRA 适配器（云端 Step 3/4 复用）
@@ -943,7 +946,11 @@ def main():
                                       "source": "r0_calibration"})
         (out_dir / "var_thresholds.json").write_text(
             json.dumps(var_threshold_records, indent=2), encoding="utf-8")
-    for round_idx in range(args.rounds):
+    if args.round_offset < 0:
+        raise SystemExit(f"--round-offset must be >= 0, got {args.round_offset}")
+    for local_round in range(args.rounds):
+        # SMELL 3 run_fed round_offset ADD — round_idx 为绝对轮号（续训时 offset+local；默认 offset=0 与旧行为一致）
+        round_idx = int(args.round_offset) + local_round
         round_started = time.time()
         # SMELL 3 run_fed rank_rotation BEGIN — 全客户端同调度：由 round_idx 决定本轮激活秩与平坦索引
         active_ranks = active_ranks_for(round_idx, args.rank_k, num_ranks, args.rank_mode)
@@ -1298,8 +1305,9 @@ def main():
                              if stats.get("var_fork_norm_mean") is not None]
         var_raw_all = [stats["var_raw_mean"] for stats in client_stats.values()
                        if stats.get("var_raw_mean") is not None]
-        var_hit_low_samples = sum(stats.get("var_hit_low", 0) for stats in client_stats.values())
-        var_hit_high_samples = sum(stats.get("var_hit_high", 0) for stats in client_stats.values())
+        # SMELL 3 run_fed var_hits FIXED — VAR 关闭时 client_stats 记录 var_hit_low/high=None，原 sum 会 TypeError（var-off 全崩）
+        var_hit_low_samples = sum((stats.get("var_hit_low") or 0) for stats in client_stats.values())
+        var_hit_high_samples = sum((stats.get("var_hit_high") or 0) for stats in client_stats.values())
         record = {
             "event": "round",
             "round": round_idx,
@@ -1412,7 +1420,7 @@ def main():
                   f"ir_min={ir_min if ir_min is not None else float('nan'):.4f}")
         # SMELL 3 run_fed catv mask END
         append_metrics(metrics_path, record)
-        print(f"[fed] round {round_idx}/{args.rounds - 1} loss={train_loss_mean} "
+        print(f"[fed] round {round_idx}/{args.round_offset + args.rounds - 1} loss={train_loss_mean} "
               f"delta_norm={record['delta_norm_mean']:.4e} clipped={clipped_clients} "
               f"cos={record['cos_mean_sampled']} time={record['round_seconds']:.1f}s "
               # SMELL 3 run_fed rank_rotation ADD — 打印本轮激活秩/通信量
@@ -1432,7 +1440,7 @@ def main():
                   f"hit_low={var_hit_low_samples} hit_high={var_hit_high_samples}")
 
         # SMELL 3 run_fed save_every ADD — 每 N 轮存 adapter（秒级），与 eval（分钟级）解耦
-        save_due = args.save_every > 0 and (round_idx + 1) % args.save_every == 0
+        save_due = args.save_every > 0 and (local_round + 1) % args.save_every == 0
         if save_due:
             saved_dir = out_dir / f"adapter_round{round_idx:03d}"
             model.save_pretrained(str(saved_dir))
@@ -1442,7 +1450,7 @@ def main():
             })
             print(f"[fed] save round {round_idx} lora_checkpoint={saved_dir}")
 
-        if args.eval_every > 0 and (round_idx + 1) % args.eval_every == 0:
+        if args.eval_every > 0 and (local_round + 1) % args.eval_every == 0:
             run_global_eval(args, model, out_dir, metrics_path, round_idx, adapter_ready=save_due)
 
     # SMELL 3 run_fed peak_mem ADD — 报告 CUDA 峰值显存（8GB 卡 BP smoke 的 OOM 判据）
