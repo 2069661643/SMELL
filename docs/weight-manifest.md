@@ -172,3 +172,11 @@ cd <dest>/SMELLv3 && sha256sum \
 
 - 口径 caveat：历史 CATV on 基线是 `--catv-normalize off`；本组合是 `client` + VAR + VQ，+0.0114 NLL 不能单独归因。
 - 旧异常终止 partial（r0–r5）：`checkpoints/distilbert_var_catv_vq_a03_r6_partial/`，仅历史。
+
+### 9.1 eval-off 复核（261022 13:36）
+
+- r29 on-mask 1.559838/0.450 vs off-mask **1.577730/0.464**；mask ΔNLL −0.017892（p=0.28 n.s.）、acc −1.4pt。
+- 30 轮均值：on 1.656088/0.4336 vs off 1.633698/0.4497；mask 平均 ΔNLL +0.02239、Δacc −0.0161（mask 的 NLL 收益只在 r25 后出现）。
+- 组合 off vs CATV-on 基线 off：30 轮 mean ΔNLL +0.003181、Δacc +0.0006；r29 +0.000506（p=0.735）⇒ VAR+VQ 权重与基线等价。
+- +0.0114 on-mask NLL 差来自 `client` 等权 mask：基线 `off` 归一化 r29 mask 收益 −0.0288，组合 `client` −0.0179，acc 多掉 0.6pt。
+- eval-off 产物：`checkpoints/distilbert_var_catv_vq_a03_r30_rerun/evaloff/`（30 × JSON + persample + SHA256SUMS）。

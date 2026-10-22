@@ -70,3 +70,23 @@ EOF
 **口径 caveat**：历史 CATV on 基线是 `--catv-normalize off`；本组合是 `client`，且叠加 VAR+VQ。
 因此 +0.0114 NLL 不能单独归因于 VAR 或 VQ；若要干净归因，需要补一个 **CATV on + client 归一化、
 VAR/VQ off** 的匹配基线（约 +7h）。
+
+## 七、eval-off 全曲线（261022 13:36）
+
+对 r0–r29 的 30 个 adapter 做了无 CATV mask 评测（与 on-mask 同协议：sdpa_prune / fp32 / sparse 0.4 / predictor / 500 样本 / bs8）。
+
+| 指标 | on-mask | off-mask | mask 效应 |
+|---|---|---|---|
+| 30 轮均值 NLL | 1.656088 | 1.633698 | **+0.022390**（on 更差） |
+| 30 轮均值 acc | 0.4336 | 0.4497 | **−0.0161**（on 更差） |
+| r29 NLL | 1.559838 | 1.577730 | **−0.017892**（on 更好，p=0.28 n.s.） |
+| r29 acc | 0.450 | 0.464 | **−0.014**（on 更差） |
+
+- mask 的 NLL 效应随训练从 **+0.052（r0，on 更差）** 逐渐下降，r25 后转负；acc 全程为负（mask 一直伤 acc）。
+- **组合 off vs CATV-on 基线 off（30 轮）**：mean ΔNLL **+0.003181**、mean Δacc **+0.0006**；r29 ΔNLL +0.000506（p=0.735）。
+  → **VAR+VQ 的权重质量与 CATV-on 基线等价**。
+- 组合 on vs CATV-on 基线 on 的 +0.0114 NLL 完全来自 **mask 选择/归一化**：
+  - 基线 `off` 归一化 mask 的 r29 NLL 收益 ≈ −0.0288；
+  - 组合 `client` 等权 mask 的 r29 NLL 收益 ≈ −0.0179；
+  - 同时组合 acc 多掉 0.6pt。
+- 归档：`checkpoints/distilbert_var_catv_vq_a03_r30_rerun/evaloff/`（30 个 off JSON + persample + SHA256SUMS）。
