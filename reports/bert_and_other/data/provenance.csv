@@ -3,6 +3,10 @@ r30_four_arm,r30_a01_catv_off,headline,logs/fed/bert_da_fixed/r30_a01_catv_off/a
 r30_four_arm,r30_a01_catv_on,headline,logs/fed/bert_da_fixed/r30_a01_catv_on/a01,cycle,30,500,USE,CATV 四臂消融；eval-off 文件在同目录
 r30_four_arm,r30_a03_catv_off,headline,logs/fed/bert_da_fixed/r30_a03_catv_off/a03,cycle,30,500,USE,CATV 四臂消融；eval-off 文件在同目录
 r30_four_arm,r30_a03_catv_on,headline,logs/fed/bert_da_fixed/r30_a03_catv_on/a03,cycle,30,500,USE,CATV 四臂消融；eval-off 文件在同目录
+opt_r30_fixed,r30_a01_catv_off,headline,logs/fed/opt_r30_fixed/r30_a01_catv_off/a01,cycle,30,500,USE,OPT fixed r30；eval every 5；r0 为 post-round-0 补测
+opt_r30_fixed,r30_a01_catv_on,headline,logs/fed/opt_r30_fixed/r30_a01_catv_on/a01,cycle,30,500,USE,OPT fixed r30；eval every 5；r0 为 post-round-0 补测
+opt_r30_fixed,r30_a03_catv_off,headline,logs/fed/opt_r30_fixed/r30_a03_catv_off/a03,cycle,30,500,USE,OPT fixed r30；eval every 5；r0 为 post-round-0 补测
+opt_r30_fixed,r30_a03_catv_on,headline,logs/fed/opt_r30_fixed/r30_a03_catv_on/a03,cycle,30,500,USE,OPT fixed r30；eval every 5；r0 为 post-round-0 补测
 bp_cycle,dense_L8_lr3e4_r10,reference,logs/fed/bert_bp_ref_cycle/dense_L8_lr3e4_r10/a01,cycle,10,250,USE_REFERENCE,BP 参考系；250 样本评测；不与 r30 绝对 NLL 混用
 bp_cycle,dense_L8_lr1e3_r10,reference,logs/fed/bert_bp_ref_cycle/dense_L8_lr1e3_r10/a01,cycle,10,250,USE_REFERENCE,BP 参考系；250 样本评测；不与 r30 绝对 NLL 混用
 bp_cycle,sparse_L8_lr3e4_r10,reference,logs/fed/bert_bp_ref_cycle/sparse_L8_lr3e4_r10/a01,cycle,10,250,USE_REFERENCE,BP 参考系；250 样本评测；不与 r30 绝对 NLL 混用

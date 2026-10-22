@@ -1,0 +1,7 @@
+tag,variant,eval_mask,full_r4,full_r29,answer_r4,answer_r29,full_delta_pct_r4_r29,answer_delta_pct_r4_r29,source_dir
+a01,off,none,32.848176,31.533372,2085.763419,2436.113283,4.00267,-16.797201,logs/fed/opt_r30_fixed/r30_a01_catv_off/a01
+a01,on_evaloff,evaloff,32.815836,31.378073,2107.110148,2522.544605,4.381306,-19.71584,logs/fed/opt_r30_fixed/r30_a01_catv_on/a01
+a01,on_evalon,evalon,33.20981,31.635054,2007.241196,2474.412025,4.741842,-23.274275,logs/fed/opt_r30_fixed/r30_a01_catv_on/a01
+a03,off,none,32.869129,31.456821,2049.215622,2448.825147,4.29676,-19.500609,logs/fed/opt_r30_fixed/r30_a03_catv_off/a03
+a03,on_evaloff,evaloff,32.827435,31.416496,2169.035425,2501.06595,4.298047,-15.30775,logs/fed/opt_r30_fixed/r30_a03_catv_on/a03
+a03,on_evalon,evalon,33.238326,31.695741,2089.502382,2291.707076,4.640984,-9.67717,logs/fed/opt_r30_fixed/r30_a03_catv_on/a03

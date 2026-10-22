@@ -2,6 +2,7 @@ run_id,raw_path,status,reason
 distilbert_ablation_r30_defect,checkpoints/distilbert_ablation_r30_defect/,EXCLUDED,CATV padding 伪影修复前的 r30 四臂；论文禁用
 bert_da,logs/fed/bert_da/,EXCLUDED,修复前 r30 链；与 defect 归档同缺陷
 bert_bp_ref,logs/fed/bert_bp_ref/,EXCLUDED,fixed（自循环样本）协议的 BP 参考；已被 bert_bp_ref_cycle 取代
+opt_legacy_fixed_runs,"logs/fed/zoo_k24_d32*, a01_zoo*, a03_zoo*",EXCLUDED,旧 fixed（前 2 篇/client）协议；reports/opt 历史图表使用，本包不混入
 bert_var_a03_r30,logs/fed/bert_var_a03_r30/,DIAGNOSTIC,旧 pool 级 VAR；非最终 Method A，不作结果
 distilbert_vq025_a03_r20_partial,checkpoints/distilbert_vq025_a03_r20_partial/,EXCLUDED,旧 total-rate 0.25 口径，r20 partial
 distilbert_vq050_bf16_a03_r0_partial,checkpoints/distilbert_vq050_bf16_a03_r0_partial/,EXCLUDED,旧 total-rate 0.5 口径，仅 r0

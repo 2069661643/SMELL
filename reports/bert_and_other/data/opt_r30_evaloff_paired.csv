@@ -1,0 +1,13 @@
+comparison,tag,a_run,b_run,a_round,b_round,field,n,mean_delta_nll,sd,se,t,p_two_sided,p_normal_approx,exp_delta_nll,ci95_low,ci95_high,verdict
+weight_effect,a01,r30_a01_catv_off,r30_a01_catv_on(evaloff),29,29,full_nll_mean,500,-0.004937,0.003581,0.00016,-30.830658,1.241045e-117,1.017778e-208,0.995075,-0.005251,-0.004623,IMPROVED
+weight_effect,a01,r30_a01_catv_off,r30_a01_catv_on(evaloff),29,29,answer_nll_mean,500,0.053245,0.32745,0.014644,3.635966,0.000306,0.000277,1.054688,0.024543,0.081947,REGRESSED
+mask_effect,a01,r30_a01_catv_on(evaloff),r30_a01_catv_on(evalon),29,29,full_nll_mean,500,0.008156,0.003243,0.000145,56.245391,3.950076e-218,0,1.00819,0.007872,0.008441,REGRESSED
+mask_effect,a01,r30_a01_catv_on(evaloff),r30_a01_catv_on(evalon),29,29,answer_nll_mean,500,-0.027024,0.248863,0.011129,-2.428139,0.015529,0.015177,0.973338,-0.048838,-0.00521,IMPROVED
+deploy_net,a01,r30_a01_catv_off,r30_a01_catv_on(evalon),29,29,full_nll_mean,500,0.003219,0.004265,0.000191,16.880462,6.638481e-51,6.265307e-64,1.003225,0.002846,0.003593,REGRESSED
+deploy_net,a01,r30_a01_catv_off,r30_a01_catv_on(evalon),29,29,answer_nll_mean,500,0.026221,0.397067,0.017757,1.476638,0.140403,0.139773,1.026568,-0.008583,0.061026,NOT-SIGNIFICANT
+weight_effect,a03,r30_a03_catv_off,r30_a03_catv_on(evaloff),29,29,full_nll_mean,500,-0.001283,0.003537,0.000158,-8.109608,3.964555e-15,5.078332e-16,0.998718,-0.001593,-0.000973,IMPROVED
+weight_effect,a03,r30_a03_catv_off,r30_a03_catv_on(evaloff),29,29,answer_nll_mean,500,0.008884,0.329695,0.014744,0.602519,0.547102,0.546829,1.008923,-0.020015,0.037783,NOT-SIGNIFICANT
+mask_effect,a03,r30_a03_catv_on(evaloff),r30_a03_catv_on(evalon),29,29,full_nll_mean,500,0.008849,0.003353,0.00015,59.021884,3.285348e-227,0,1.008888,0.008555,0.009143,REGRESSED
+mask_effect,a03,r30_a03_catv_on(evaloff),r30_a03_catv_on(evalon),29,29,answer_nll_mean,500,-0.102097,0.288718,0.012912,-7.907243,1.703187e-14,2.631514e-15,0.902942,-0.127405,-0.07679,IMPROVED
+deploy_net,a03,r30_a03_catv_off,r30_a03_catv_on(evalon),29,29,full_nll_mean,500,0.007566,0.004364,0.000195,38.773275,1.136504e-152,0,1.007595,0.007184,0.007949,REGRESSED
+deploy_net,a03,r30_a03_catv_off,r30_a03_catv_on(evalon),29,29,answer_nll_mean,500,-0.093214,0.383354,0.017144,-5.437061,8.491997e-08,5.416654e-08,0.910999,-0.126816,-0.059611,IMPROVED

@@ -1,0 +1,3 @@
+baseline,n,tag,attn,sparse,full_ppl_token,answer_ppl_token,source_file,note
+fresh_pretrain_a01,500,a01,sdpa_prune,0.4,33.665317,1740.631953,temp/eval_fixed_fresh_a01.json,OPT pre-training fresh baseline; a01/a03 identical by construction
+fresh_pretrain_a03,500,a03,sdpa_prune,0.4,33.665317,1740.631953,temp/eval_fixed_fresh_a03.json,OPT pre-training fresh baseline; a01/a03 identical by construction

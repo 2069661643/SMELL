@@ -1,10 +1,11 @@
-# SMELL 3 bert_and_other_report NEW — BERT post-cycle CSV/README package (no figures)
+# SMELL 3 bert_and_other_report NEW — BERT + OPT fixed post-cycle CSV/README package (no figures)
 """Build reports/bert_and_other from raw logs (CPU-only, deterministic).
 
 Scope: BERT experiments after the 261012 fixed-60-doc self-loop fix
-(`--doc-order cycle`). Pre-fix defect arms, old fixed-order runs, and
-non-final partial runs are listed in excluded_runs.csv but never mixed into
-the main CSVs. No figures are produced; the paper agent renders them later.
+(`--doc-order cycle`) plus the OPT fixed r30 four-arm chain (also cycle).
+Pre-fix defect arms, old fixed-order runs, and non-final partial runs are
+listed in excluded_runs.csv but never mixed into the main CSVs. No figures
+are produced; the paper agent renders them later.
 
 Usage:
   PY=~/miniconda3/envs/SMELL/bin/python
@@ -39,6 +40,14 @@ R30_ARMS = [
     {"run_id": "r30_a03_catv_off", "tag": "a03", "catv": "off"},
     {"run_id": "r30_a03_catv_on", "tag": "a03", "catv": "on"},
 ]
+
+OPT_ARMS = [
+    {"run_id": "r30_a01_catv_off", "tag": "a01", "catv": "off"},
+    {"run_id": "r30_a01_catv_on", "tag": "a01", "catv": "on"},
+    {"run_id": "r30_a03_catv_off", "tag": "a03", "catv": "off"},
+    {"run_id": "r30_a03_catv_on", "tag": "a03", "catv": "on"},
+]
+OPT_EVAL_ROUNDS = [4, 9, 14, 19, 24, 29]
 
 BP_RUNS = [
     "dense_L8_lr3e4_r10",
@@ -102,6 +111,20 @@ FILE_NOTES = [
      "同上"),
     ("bert_r30_evaloff_paired.csv", "权重效应、推理掩码效应、总效应、r0 起点核验",
      "同上 + eval{off,}_round{000,029}_persample.json"),
+    ("opt_r30_rounds.csv", "OPT fixed 4 臂 × r0/4/9/14/19/24/29 的 full/answer PPL 曲线",
+     "logs/fed/opt_r30_fixed/<arm>/<tag>/metrics.jsonl + eval_roundNNN.json"),
+    ("opt_r30_endpoints.csv", "OPT fixed 4 臂 r0/r4/r29 端点、vs fresh、墙钟、adapter sha256",
+     "同上 + temp/eval_fixed_fresh_<tag>.json"),
+    ("opt_r30_paired.csv", "OPT fixed 的 r0→r29、r4→r29、fresh→r29、CATV on-vs-off 配对",
+     "logs/fed/opt_r30_fixed/.../eval{,_round}_persample.json + temp/eval_fixed_fresh_<tag>_persample.json"),
+    ("opt_r30_evaloff_rounds.csv", "OPT CATV on 臂逐评测点带掩码/去掩码 full/answer PPL",
+     "logs/fed/opt_r30_fixed/r30_<tag>_catv_on/<tag>/eval{off,}_roundNNN.json"),
+    ("opt_r30_evaloff_endpoints.csv", "OPT off / on-evaloff / on-evalon 三栏端点（r4/r29）",
+     "同上"),
+    ("opt_r30_evaloff_paired.csv", "OPT 权重效应、推理掩码效应、部署净效应（full/answer）",
+     "同上 + eval{off,}_round029_persample.json"),
+    ("opt_baselines.csv", "OPT fresh pre-training 基线（a01/a03，500 样本）",
+     "temp/eval_fixed_fresh_{a01,a03}.json"),
     ("bert_bp_cycle.csv", "BP 参考系（cycle，250 样本）：dense/sparse × lr × 轮数",
      "logs/fed/bert_bp_ref_cycle/<run>/a01/metrics.jsonl"),
     ("bert_ld_grid.csv", "L×D 网格 + fixed / iso-corpus / dense 对照（cycle，250 样本）",
@@ -228,9 +251,8 @@ def eval_file(run_dir, round_idx, evaloff=False):
     return read_json(path)
 
 
-def persample_file(run_dir, round_idx, evaloff=False):
-    stem = "evaloff" if evaloff else "eval"
-    path = Path(run_dir) / f"{stem}_round{round_idx:03d}_persample.json"
+def persample_path(path, field):
+    path = Path(path)
     if not path.exists():
         raise SystemExit(f"missing per-sample json: {path}")
     payload = read_json(path)
@@ -241,7 +263,7 @@ def persample_file(run_dir, round_idx, evaloff=False):
     for index, row in enumerate(rows):
         if isinstance(row, dict):
             key = int(row.get("index", index))
-            value = row.get("nll")
+            value = row.get(field)
         else:
             key = index
             value = row
@@ -250,6 +272,43 @@ def persample_file(run_dir, round_idx, evaloff=False):
     if not out:
         raise SystemExit(f"empty per-sample data: {path}")
     return out
+
+
+def persample_field(run_dir, round_idx, field, evaloff=False):
+    stem = "evaloff" if evaloff else "eval"
+    path = Path(run_dir) / f"{stem}_round{round_idx:03d}_persample.json"
+    return persample_path(path, field)
+
+
+def persample_file(run_dir, round_idx, evaloff=False):
+    return persample_field(run_dir, round_idx, "nll", evaloff=evaloff)
+
+
+def opt_eval_map(run_dir):
+    path = Path(run_dir) / "metrics.jsonl"
+    if not path.exists():
+        raise SystemExit(f"missing metrics: {path}")
+    out = {}
+    for row in read_jsonl(path):
+        if row.get("event") != "eval" or row.get("status") != "ok":
+            continue
+        if row.get("round") is None or row.get("full_ppl_token") is None:
+            continue
+        out[int(row["round"])] = row
+    if not out:
+        raise SystemExit(f"no OPT eval rows in {path}")
+    return out
+
+
+def opt_eval_file(run_dir, round_idx, evaloff=False):
+    stem = "evaloff" if evaloff else "eval"
+    path = Path(run_dir) / f"{stem}_round{round_idx:03d}.json"
+    if not path.exists():
+        raise SystemExit(f"missing OPT eval json: {path}")
+    payload = read_json(path)
+    if payload.get("full_ppl_token") is None:
+        raise SystemExit(f"OPT eval json missing full_ppl_token: {path}")
+    return payload
 
 
 def block_span_hours(run_dir):
@@ -321,6 +380,54 @@ def endpoint_metrics(run_dir):
         "wall_hours": hours,
         "nll_pct_per_hour": (delta_nll_pct / hours) if delta_nll_pct is not None and hours else None,
         "adapter_sha256": adapter_sha(run_dir, last),
+    }
+
+
+def opt_endpoint_metrics(run_dir, tag):
+    evals = opt_eval_map(run_dir)
+    records = round_map(run_dir)
+    r0 = opt_eval_file(run_dir, 0)
+    r4 = evals[OPT_EVAL_ROUNDS[0]]
+    r29 = evals[OPT_EVAL_ROUNDS[-1]]
+    fresh = read_json(REPO / f"temp/eval_fixed_fresh_{tag}.json")
+    full_r0 = float(r0["full_ppl_token"])
+    full_r4 = float(r4["full_ppl_token"])
+    full_r29 = float(r29["full_ppl_token"])
+    answer_r0 = float(r0["answer_ppl_token"])
+    answer_r4 = float(r4["answer_ppl_token"])
+    answer_r29 = float(r29["answer_ppl_token"])
+    round_seconds = [records[key].get("round_seconds") for key in sorted(records)]
+    train_hours = sum(float(value) for value in round_seconds if value is not None) / 3600.0
+    wall_hours = block_span_hours(run_dir)
+    clipped = [records[key].get("clipped_clients") for key in sorted(records)]
+    full_delta_r0 = (full_r0 - full_r29) / full_r0 * 100.0
+    answer_delta_r0 = (answer_r0 - answer_r29) / answer_r0 * 100.0
+    full_delta_r4 = (full_r4 - full_r29) / full_r4 * 100.0
+    answer_delta_r4 = (answer_r4 - answer_r29) / answer_r4 * 100.0
+    return {
+        "run_dir": Path(run_dir),
+        "eval_n": int(r0.get("num_samples") or 500),
+        "rounds": len(records),
+        "full_r0": full_r0,
+        "full_r4": full_r4,
+        "full_r29": full_r29,
+        "answer_r0": answer_r0,
+        "answer_r4": answer_r4,
+        "answer_r29": answer_r29,
+        "full_delta_pct_r0_r29": full_delta_r0,
+        "answer_delta_pct_r0_r29": answer_delta_r0,
+        "full_delta_pct_r4_r29": full_delta_r4,
+        "answer_delta_pct_r4_r29": answer_delta_r4,
+        "vs_fresh_full_pct": (float(fresh["full_ppl_token"]) - full_r29)
+        / float(fresh["full_ppl_token"]) * 100.0,
+        "vs_fresh_answer_pct": (float(fresh["answer_ppl_token"]) - answer_r29)
+        / float(fresh["answer_ppl_token"]) * 100.0,
+        "clipped_clients_total": sum_optional(clipped),
+        "mean_round_seconds": mean_optional(round_seconds),
+        "train_hours": train_hours,
+        "wall_hours": wall_hours,
+        "full_pct_per_hour_r4_r29": full_delta_r4 / train_hours if train_hours else None,
+        "adapter_sha256": adapter_sha(run_dir, 29),
     }
 
 
@@ -530,6 +637,197 @@ def r30_evaloff_package(r30):
     write_csv(DATA_DIR / "bert_r30_evaloff_paired.csv", PAIRED_HEADER, paired_rows)
     return {"endpoints": endpoints,
             "paired": {(row[0], row[1]): row for row in paired_rows}}
+
+
+def opt_package():
+    round_rows = []
+    endpoint_rows = []
+    endpoints = {}
+    run_dirs = {}
+    for arm in OPT_ARMS:
+        run_dir = RUN_ROOT / "opt_r30_fixed" / arm["run_id"] / arm["tag"]
+        run_dirs[arm["run_id"]] = run_dir
+        config = read_json(run_dir / "config.json")
+        metrics = opt_endpoint_metrics(run_dir, arm["tag"])
+        endpoints[arm["run_id"]] = metrics
+        evals = opt_eval_map(run_dir)
+        records = round_map(run_dir)
+        for round_idx in [0] + OPT_EVAL_ROUNDS:
+            if round_idx == 0:
+                payload = opt_eval_file(run_dir, 0)
+            else:
+                payload = evals[round_idx]
+            record = records.get(round_idx, {})
+            round_rows.append([
+                arm["run_id"], arm["tag"], arm["catv"], config.get("catv_normalize"),
+                round_idx, "on" if arm["catv"] == "on" else "none",
+                payload.get("full_ppl_token"), payload.get("answer_ppl_token"),
+                payload.get("num_samples"), record.get("round_seconds"),
+                record.get("train_loss_mean"), record.get("delta_norm_mean"),
+                record.get("delta_norm_max"), record.get("clipped_clients"),
+                record.get("catv_r"), record.get("anchor_in"), record.get("anchor_out"),
+                record.get("ir_mean"), config.get("doc_order"), rel(run_dir),
+            ])
+        endpoint_rows.append([
+            arm["run_id"], arm["tag"], arm["catv"], config.get("catv_normalize"),
+            config.get("doc_order"), metrics["rounds"], metrics["eval_n"],
+            metrics["full_r0"], metrics["full_r4"], metrics["full_r29"],
+            metrics["answer_r0"], metrics["answer_r4"], metrics["answer_r29"],
+            metrics["full_delta_pct_r0_r29"], metrics["answer_delta_pct_r0_r29"],
+            metrics["full_delta_pct_r4_r29"], metrics["answer_delta_pct_r4_r29"],
+            metrics["vs_fresh_full_pct"], metrics["vs_fresh_answer_pct"],
+            metrics["clipped_clients_total"], metrics["mean_round_seconds"],
+            metrics["train_hours"], metrics["wall_hours"],
+            metrics["full_pct_per_hour_r4_r29"], metrics["adapter_sha256"],
+            rel(run_dir),
+        ])
+    write_csv(
+        DATA_DIR / "opt_r30_rounds.csv",
+        ["run_id", "tag", "catv", "catv_normalize", "round", "eval_mask",
+         "full_ppl_token", "answer_ppl_token", "num_samples", "round_seconds",
+         "train_loss_mean", "delta_norm_mean", "delta_norm_max", "clipped_clients",
+         "catv_r", "catv_anchor_in", "catv_anchor_out", "catv_ir_mean",
+         "doc_order", "source_dir"],
+        round_rows,
+    )
+    write_csv(
+        DATA_DIR / "opt_r30_endpoints.csv",
+        ["run_id", "tag", "catv", "catv_normalize", "doc_order", "rounds", "eval_n",
+         "full_r0", "full_r4", "full_r29", "answer_r0", "answer_r4", "answer_r29",
+         "full_delta_pct_r0_r29", "answer_delta_pct_r0_r29",
+         "full_delta_pct_r4_r29", "answer_delta_pct_r4_r29",
+         "vs_fresh_full_pct", "vs_fresh_answer_pct", "clipped_clients_total",
+         "mean_round_seconds", "train_hours", "wall_hours",
+         "full_pct_per_hour_r4_r29", "adapter_sha256", "source_dir"],
+        endpoint_rows,
+    )
+
+    paired_rows = []
+    for arm in OPT_ARMS:
+        run_dir = run_dirs[arm["run_id"]]
+        tag = arm["tag"]
+        fresh_path = REPO / f"temp/eval_fixed_fresh_{tag}_persample.json"
+        for field in ("full_nll_mean", "answer_nll_mean"):
+            paired_rows.append(paired_row(
+                "r0_to_r29", tag, arm["run_id"], arm["run_id"], 0, 29,
+                persample_field(run_dir, 0, field),
+                persample_field(run_dir, 29, field), field=field,
+            ))
+            paired_rows.append(paired_row(
+                "r4_to_r29", tag, arm["run_id"], arm["run_id"], 4, 29,
+                persample_field(run_dir, 4, field),
+                persample_field(run_dir, 29, field), field=field,
+            ))
+            paired_rows.append(paired_row(
+                "fresh_to_r29", tag, f"fresh_{tag}", arm["run_id"], 29, 29,
+                persample_path(fresh_path, field),
+                persample_field(run_dir, 29, field), field=field,
+            ))
+    for tag in ("a01", "a03"):
+        off_dir = run_dirs[f"r30_{tag}_catv_off"]
+        on_dir = run_dirs[f"r30_{tag}_catv_on"]
+        for field in ("full_nll_mean", "answer_nll_mean"):
+            paired_rows.append(paired_row(
+                "catv_on_vs_off_r29", tag, f"r30_{tag}_catv_off",
+                f"r30_{tag}_catv_on", 29, 29,
+                persample_field(off_dir, 29, field),
+                persample_field(on_dir, 29, field), field=field,
+            ))
+    write_csv(DATA_DIR / "opt_r30_paired.csv", PAIRED_HEADER, paired_rows)
+    return {"endpoints": endpoints,
+            "paired": {(row[0], row[1], row[6]): row for row in paired_rows}}
+
+
+def opt_evaloff_package():
+    round_rows = []
+    endpoint_rows = []
+    paired_rows = []
+    endpoints = {}
+    for tag in ("a01", "a03"):
+        off_dir = RUN_ROOT / "opt_r30_fixed" / f"r30_{tag}_catv_off" / tag
+        on_dir = RUN_ROOT / "opt_r30_fixed" / f"r30_{tag}_catv_on" / tag
+        for round_idx in OPT_EVAL_ROUNDS:
+            on_row = opt_eval_file(on_dir, round_idx, evaloff=False)
+            off_row = opt_eval_file(on_dir, round_idx, evaloff=True)
+            round_rows.append([
+                tag, round_idx, on_row.get("full_ppl_token"),
+                on_row.get("answer_ppl_token"), off_row.get("full_ppl_token"),
+                off_row.get("answer_ppl_token"),
+                float(on_row["full_ppl_token"]) - float(off_row["full_ppl_token"]),
+                float(on_row["answer_ppl_token"]) - float(off_row["answer_ppl_token"]),
+            ])
+        variants = [
+            ("off", off_dir, False),
+            ("on_evaloff", on_dir, True),
+            ("on_evalon", on_dir, False),
+        ]
+        for label, run_dir, eo in variants:
+            r4 = opt_eval_file(run_dir, 4, evaloff=eo)
+            r29 = opt_eval_file(run_dir, 29, evaloff=eo)
+            full_r4 = float(r4["full_ppl_token"])
+            full_r29 = float(r29["full_ppl_token"])
+            answer_r4 = float(r4["answer_ppl_token"])
+            answer_r29 = float(r29["answer_ppl_token"])
+            endpoints[(tag, label)] = {"full_r4": full_r4, "full_r29": full_r29,
+                                        "answer_r4": answer_r4, "answer_r29": answer_r29}
+            endpoint_rows.append([
+                tag, label, "none" if label == "off" else ("evaloff" if eo else "evalon"),
+                full_r4, full_r29, answer_r4, answer_r29,
+                (full_r4 - full_r29) / full_r4 * 100.0,
+                (answer_r4 - answer_r29) / answer_r4 * 100.0, rel(run_dir),
+            ])
+        specs = [
+            ("weight_effect", f"r30_{tag}_catv_off", f"r30_{tag}_catv_on(evaloff)",
+             29, 29, off_dir, on_dir, False, True),
+            ("mask_effect", f"r30_{tag}_catv_on(evaloff)", f"r30_{tag}_catv_on(evalon)",
+             29, 29, on_dir, on_dir, True, False),
+            ("deploy_net", f"r30_{tag}_catv_off", f"r30_{tag}_catv_on(evalon)",
+             29, 29, off_dir, on_dir, False, False),
+        ]
+        for label, a_name, b_name, a_round, b_round, a_dir, b_dir, a_eo, b_eo in specs:
+            for field in ("full_nll_mean", "answer_nll_mean"):
+                paired_rows.append(paired_row(
+                    label, tag, a_name, b_name, a_round, b_round,
+                    persample_field(a_dir, a_round, field, evaloff=a_eo),
+                    persample_field(b_dir, b_round, field, evaloff=b_eo),
+                    field=field,
+                ))
+    write_csv(
+        DATA_DIR / "opt_r30_evaloff_rounds.csv",
+        ["tag", "round", "full_on", "answer_on", "full_off", "answer_off",
+         "delta_full_on_minus_off", "delta_answer_on_minus_off"],
+        round_rows,
+    )
+    write_csv(
+        DATA_DIR / "opt_r30_evaloff_endpoints.csv",
+        ["tag", "variant", "eval_mask", "full_r4", "full_r29", "answer_r4",
+         "answer_r29", "full_delta_pct_r4_r29", "answer_delta_pct_r4_r29",
+         "source_dir"],
+        endpoint_rows,
+    )
+    write_csv(DATA_DIR / "opt_r30_evaloff_paired.csv", PAIRED_HEADER, paired_rows)
+    return {"endpoints": endpoints,
+            "paired": {(row[0], row[1], row[6]): row for row in paired_rows}}
+
+
+def opt_baselines_package():
+    rows = []
+    for tag in ("a01", "a03"):
+        path = f"temp/eval_fixed_fresh_{tag}.json"
+        payload = read_json(REPO / path)
+        rows.append([
+            f"fresh_pretrain_{tag}", payload.get("num_samples"), tag,
+            payload.get("attn"), payload.get("sparse"), payload.get("full_ppl_token"),
+            payload.get("answer_ppl_token"), path,
+            "OPT pre-training fresh baseline; a01/a03 identical by construction",
+        ])
+    write_csv(
+        DATA_DIR / "opt_baselines.csv",
+        ["baseline", "n", "tag", "attn", "sparse", "full_ppl_token",
+         "answer_ppl_token", "source_file", "note"],
+        rows,
+    )
+    return {row[0]: row for row in rows}
 
 
 def bp_package():
@@ -869,7 +1167,7 @@ def baselines_package():
     return {row[0]: row for row in rows}
 
 
-def provenance_package(r30, bpp, ldp, lr_scan):
+def provenance_package(r30, bpp, ldp, lr_scan, opt):
     rows = []
 
     def add(group, run_id, role, raw_path, doc_order, rounds, eval_n, status, note):
@@ -881,6 +1179,12 @@ def provenance_package(r30, bpp, ldp, lr_scan):
         add("r30_four_arm", arm["run_id"], "headline", rel(run_dir),
             "cycle", metrics["n_evals"], metrics["eval_n"], "USE",
             "CATV 四臂消融；eval-off 文件在同目录")
+    for arm in OPT_ARMS:
+        run_dir = RUN_ROOT / "opt_r30_fixed" / arm["run_id"] / arm["tag"]
+        metrics = opt["endpoints"][arm["run_id"]]
+        add("opt_r30_fixed", arm["run_id"], "headline", rel(run_dir),
+            "cycle", metrics["rounds"], metrics["eval_n"], "USE",
+            "OPT fixed r30；eval every 5；r0 为 post-round-0 补测")
     for run_id in BP_RUNS:
         run_dir = RUN_ROOT / "bert_bp_ref_cycle" / run_id / "a01"
         metrics = bpp[run_id]
@@ -930,6 +1234,8 @@ def excluded_package():
          "EXCLUDED", "修复前 r30 链；与 defect 归档同缺陷"],
         ["bert_bp_ref", "logs/fed/bert_bp_ref/",
          "EXCLUDED", "fixed（自循环样本）协议的 BP 参考；已被 bert_bp_ref_cycle 取代"],
+        ["opt_legacy_fixed_runs", "logs/fed/zoo_k24_d32*, a01_zoo*, a03_zoo*",
+         "EXCLUDED", "旧 fixed（前 2 篇/client）协议；reports/opt 历史图表使用，本包不混入"],
         ["bert_var_a03_r30", "logs/fed/bert_var_a03_r30/",
          "DIAGNOSTIC", "旧 pool 级 VAR；非最终 Method A，不作结果"],
         ["distilbert_vq025_a03_r20_partial", "checkpoints/distilbert_vq025_a03_r20_partial/",
@@ -957,7 +1263,8 @@ def check(name, got, want, tol):
     return (name, got, want, tol, ok)
 
 
-def validation(r30, evaloff, bpp, ldp, vq, var, combo, combo_evaloff, tech):
+def validation(r30, evaloff, opt, opt_evaloff, opt_baselines,
+               bpp, ldp, vq, var, combo, combo_evaloff, tech):
     checks = []
 
     def ep_endpoint(metrics, field):
@@ -991,6 +1298,50 @@ def validation(r30, evaloff, bpp, ldp, vq, var, combo, combo_evaloff, tech):
                         evaloff["paired"][("mask_effect", "a03")][8], -0.0288, 5e-4))
     checks.append(check("a03 weight effect dNLL",
                         evaloff["paired"][("weight_effect", "a03")][8], -0.0115, 5e-4))
+
+    for run_id, full_r0, full_r29, answer_r0, answer_r29 in [
+        ("r30_a01_catv_off", 33.525272, 31.533372, 1782.0397, 2436.1133),
+        ("r30_a01_catv_on", 33.921101, 31.635054, 1744.9838, 2474.4120),
+        ("r30_a03_catv_off", 33.529889, 31.456821, 1765.3404, 2448.8251),
+        ("r30_a03_catv_on", 33.939862, 31.695741, 1598.1708, 2291.7071),
+    ]:
+        metrics = opt["endpoints"][run_id]
+        checks.append(check(f"OPT {run_id} full_r0", metrics["full_r0"], full_r0, 5e-4))
+        checks.append(check(f"OPT {run_id} full_r29", metrics["full_r29"], full_r29, 5e-4))
+        checks.append(check(f"OPT {run_id} answer_r0", metrics["answer_r0"], answer_r0, 0.02))
+        checks.append(check(f"OPT {run_id} answer_r29", metrics["answer_r29"], answer_r29, 0.02))
+    for tag, want_full, want_answer in [
+        ("a01", 0.003219, 0.026221),
+        ("a03", 0.007566, -0.093214),
+    ]:
+        checks.append(check(f"OPT {tag} CATV on-vs-off full",
+                            opt["paired"][("catv_on_vs_off_r29", tag, "full_nll_mean")][8],
+                            want_full, 5e-5))
+        checks.append(check(f"OPT {tag} CATV on-vs-off answer",
+                            opt["paired"][("catv_on_vs_off_r29", tag, "answer_nll_mean")][8],
+                            want_answer, 5e-5))
+    for tag, want_full, want_answer in [("a01", 33.665317, 1740.6320),
+                                        ("a03", 33.665317, 1740.6320)]:
+        row = opt_baselines[f"fresh_pretrain_{tag}"]
+        checks.append(check(f"OPT fresh {tag} full", row[5], want_full, 5e-4))
+        checks.append(check(f"OPT fresh {tag} answer", row[6], want_answer, 0.02))
+    for tag, label, want_full, want_answer in [
+        ("a01", "weight_effect", -0.004937, 0.053245),
+        ("a01", "mask_effect", 0.008156, -0.027024),
+        ("a01", "deploy_net", 0.003219, 0.026221),
+        ("a03", "weight_effect", -0.001283, 0.008884),
+        ("a03", "mask_effect", 0.008849, -0.102097),
+        ("a03", "deploy_net", 0.007566, -0.093214),
+    ]:
+        checks.append(check(f"OPT {tag} {label} full",
+                            opt_evaloff["paired"][(label, tag, "full_nll_mean")][8],
+                            want_full, 5e-5))
+        checks.append(check(f"OPT {tag} {label} answer",
+                            opt_evaloff["paired"][(label, tag, "answer_nll_mean")][8],
+                            want_answer, 5e-5))
+    checks.append(check("OPT a03 deploy answer p",
+                        opt_evaloff["paired"][("deploy_net", "a03", "answer_nll_mean")][13],
+                        5.4e-8, 2e-8))
 
     for run_id, want_nll, want_acc in [
         ("dense_L8_lr3e4_r10", 1.395443, 0.536),
@@ -1046,7 +1397,7 @@ def readme_text(file_counts, checks):
     passed = sum(1 for item in checks if item[-1])
     failed = [item for item in checks if not item[-1]]
     lines = []
-    lines.append("# BERT results package (post self-loop fix)")
+    lines.append("# BERT + OPT fixed results package (post self-loop fix)")
     lines.append("")
     lines.append("由 `reports/bert_and_other/make_report.py` 从原始 `logs/fed/` 与 `temp/` 产物自动生成；")
     lines.append("纯 CPU、确定性；**不含图片**（论文图由论文 Agent 统一生成）。")
@@ -1061,7 +1412,8 @@ def readme_text(file_counts, checks):
     lines.append("- 修复：`--doc-order cycle`，`start=(round*local_steps)%总行数`；本包主表全部为 `cycle`。")
     lines.append("- 唯一 `fixed` 行是 `bert_ld_grid.csv` 的 `fixed_L8D8`，作为 H2 语料对照故意保留。")
     lines.append("- 修复前缺陷臂、旧 fixed 协议、partial/诊断 run 均列入 `excluded_runs.csv`，不混入主表。")
-    lines.append("- OPT 侧 cycle r30 四臂已在 `reports/opt/`，本包不重复；这里只收 BERT + BERT 上的 VQ/VAR/CATV/BP/LD。")
+    lines.append("- **OPT fixed r30 四臂也纳入本包**（`opt_r30_*`）：cycle、k=24/D=32/L=2/lr=0.30/clip=13.34、")
+    lines.append("  eval every 5；`reports/opt/` 保留旧 OPT 图表/长跑，二者口径不同，不要混用。")
     lines.append("")
     lines.append("## 文件索引")
     lines.append("")
@@ -1081,9 +1433,14 @@ def readme_text(file_counts, checks):
     lines.append("- 配对检验：`b - a` 的逐样本 NLL；负值 = b 更好。`p_two_sided` 用 scipy t 分布；")
     lines.append("  `p_normal_approx` 用正态近似，和 261015/261021/261022 ailog 的历史 p 值一致。")
     lines.append("  `exp_delta_nll = exp(mean ΔNLL)`，是逐样本似然比，不是 PPL 比。")
+    lines.append("  `p=0` 表示 double 下溢（t 很大），不是缺失；OPT 的 full 侧常见。")
     lines.append("- `wall_hours` = `config.json` mtime → 最后一个 `adapter_round*` mtime；含评测时间，")
     lines.append("  只适合同协议内比较。`nll_pct_per_hour = delta_nll_pct / wall_hours`。")
     lines.append("- `adapter_sha256` 是 `adapter_round029/adapter_model.safetensors` 的 sha256。")
+    lines.append("- **OPT 口径**：`full_ppl_token` / `answer_ppl_token` 是 token 加权 PPL，不是 BERT 的 NLL/acc；")
+    lines.append("  OPT eval 每 5 轮（r4/9/14/19/24/29），r0 是 post-round-0 补测（训练前 fresh = 33.6653/1740.63）；")
+    lines.append("  `answer_ppl_token` 随训练通常变差，CATV 的收益在 answer 侧；不要与 BERT 500 样本 NLL 混表。")
+    lines.append("  `full_pct_per_hour_r4_r29` 用 `train_hours`（各轮 `round_seconds` 求和），与 ailog 的 %/h 一致。")
     lines.append("- `bert_technique_endpoints.csv` 的 `vq_bytes_total` / `dense_all_bytes_total` 是 30 轮求和；")
     lines.append("  `mean_vq_channels` / `mean_vq_total_ratio` 是 30 轮均值。VQ 无 VAR 时 `vq_channels=64`；")
     lines.append("  组合的 `C_i=sum(D)` 逐 client 变化，因此 `mean_vq_channels≈72`。")
@@ -1104,6 +1461,9 @@ def readme_text(file_counts, checks):
     lines.append("  “一条 dense delta”的总量（C 倍）。`vq_cos_mean` 是聚合后 cos，不能反推 per-result rate。")
     lines.append("- **LD/BP**：sparse 臂用 `sdpa_prune`，自身基线比 dense 高约 0.18 nats（剪枝惩罚）；")
     lines.append("  `fixed_L8D8` 是 fixed 对照，不是修复后主结果；`B1/B2` 是等 40 篇唯一语料对照。")
+    lines.append("- **OPT fixed**：full 侧 CATV 部署净效应略差（a01 +0.0032 / a03 +0.0076 nats，显著但量级小）；")
+    lines.append("  answer 侧仅 a03 显著更好（−0.0932，p=5.4e-8），a01 +0.0262（p=0.14 n.s.）。")
+    lines.append("  on 臂 r0 已带 mask，跨臂比较用 r29；OPT 结果不与 BERT 的 NLL/acc 混表。")
     lines.append("- **单 seed**：所有 r30 端点都是单次 run，无跨 seed 误差棒。")
     lines.append("")
     lines.append("## 主要端点（r29，500 样本）")
@@ -1120,6 +1480,17 @@ def readme_text(file_counts, checks):
     lines.append("| combo eval-off | 1.6904 → 1.5777 | 0.426 → 0.464 | vs a03 on eval-off ΔNLL +0.0005 (p=0.735) |")
     lines.append("")
     lines.append("表中 p 值用历史 ailog 的正态近似；CSV 同时给 `p_two_sided`（scipy t）与 `p_normal_approx`。")
+    lines.append("")
+    lines.append("## OPT fixed r30 主要端点（PPL，500 样本）")
+    lines.append("")
+    lines.append("| run | full r0 → r29 | answer r0 → r29 | 关键配对 |")
+    lines.append("|---|---:|---:|---|")
+    lines.append("| a01 CATV off | 33.525 → 31.533 | 1782 → 2436 | baseline |")
+    lines.append("| a01 CATV on | 33.921 → 31.635 | 1745 → 2474 | on vs off full +0.0032（p≈0）；answer +0.0262（p=0.14 n.s.） |")
+    lines.append("| a03 CATV off | 33.530 → 31.457 | 1765 → 2449 | baseline |")
+    lines.append("| a03 CATV on | 33.940 → 31.696 | 1598 → 2292 | on vs off full +0.0076（p≈0）；answer −0.0932（p=5.4e-8） |")
+    lines.append("")
+    lines.append("OPT 的 `own%` 起点是 r4（首个 in-run eval）；vs fresh 用训练前 33.6653/1740.63。")
     lines.append("")
     lines.append("## 复现")
     lines.append("")
@@ -1141,7 +1512,7 @@ def readme_text(file_counts, checks):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Build the BERT post-cycle CSV package")
+    parser = argparse.ArgumentParser(description="Build the BERT + OPT fixed post-cycle CSV package")
     parser.add_argument("--out", default=str(OUT_ROOT), help="output directory")
     parser.add_argument("--no-check", action="store_true", help="skip ailog cross-checks")
     return parser.parse_args()
@@ -1157,6 +1528,9 @@ def main():
 
     r30 = r30_package()
     evaloff = r30_evaloff_package(r30)
+    opt = opt_package()
+    opt_evaloff = opt_evaloff_package()
+    opt_baselines = opt_baselines_package()
     bpp = bp_package()
     ldp = ld_package()
     lr_scan = lr_scan_package()
@@ -1166,10 +1540,11 @@ def main():
     combo_evaloff = combo_evaloff_package()
     tech = technique_package(vq, var, combo, combo_evaloff, r30)
     baselines_package()
-    provenance_package(r30, bpp, ldp, lr_scan)
+    provenance_package(r30, bpp, ldp, lr_scan, opt)
     excluded_package()
 
-    checks = validation(r30, evaloff, bpp, ldp, vq, var, combo, combo_evaloff, tech)
+    checks = validation(r30, evaloff, opt, opt_evaloff, opt_baselines,
+                        bpp, ldp, vq, var, combo, combo_evaloff, tech)
     print("== ailog cross-checks ==")
     bad = 0
     for name, got, want, tol, ok in checks:
