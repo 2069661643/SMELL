@@ -46,6 +46,9 @@
 | `data/provenance.csv` | 34 | 每个被纳入 run 的原始路径、协议、轮数、状态 | logs/fed/、temp/ 原始产物清点 |
 | `data/excluded_runs.csv` | 12 | 未纳入的缺陷臂 / 旧协议 / partial / 诊断 run 及原因 | checkpoints/ 与 logs/fed/ 清点 |
 
+配置（论文侧直接引用）：`BERT_CONFIG.md` 是 BERT r30 四臂的可读配置表（序列长度、LoRA、local steps、lr、数据构造、变体）；
+`bert_config.json` 是同一内容的机器可读版，均由实际 `config.json` + `meta.json` 生成。
+
 ## 口径
 
 - `nll` = global_test 上的逐样本交叉熵均值（BERT 分类 NLL），不是 PPL；

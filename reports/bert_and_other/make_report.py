@@ -1167,6 +1167,375 @@ def baselines_package():
     return {row[0]: row for row in rows}
 
 
+def markdown_table(header, rows):
+    lines = ["| " + " | ".join(header) + " |",
+             "|" + "|".join(["---"] * len(header)) + "|"]
+    for row in rows:
+        lines.append("| " + " | ".join(str(value) for value in row) + " |")
+    return "\n".join(lines)
+
+
+def bert_config_payload():
+    run_dir = RUN_ROOT / "bert_da_fixed" / "r30_a03_catv_off" / "a03"
+    config = read_json(run_dir / "config.json")
+    model_config = read_json(Path(config["model_dir"]) / "config.json")
+    on_config = read_json(RUN_ROOT / "bert_da_fixed" / "r30_a03_catv_on" / "a03" / "config.json")
+    vq_config = read_json(RUN_ROOT / "bert_vq050_bf16_perresult_a03" / "a03" / "config.json")
+    var_config = read_json(RUN_ROOT / "bert_var_methoda_a03_r30" / "a03" / "config.json")
+    combo_config = read_json(RUN_ROOT / "bert_var_catv_vq_a03_r30_rerun" / "a03" / "config.json")
+    meta_a01 = read_json(REPO / "dataset_v3" / "arxiv_16k" / "a01" / "meta.json")
+    meta_a03 = read_json(REPO / "dataset_v3" / "arxiv_16k" / "a03" / "meta.json")
+    warmup_meta = read_json(REPO / "dataset_v3" / "arxiv_16k" / "a01" / "warmup_meta.json")
+    on_round = round_map(RUN_ROOT / "bert_da_fixed" / "r30_a03_catv_on" / "a03").get(0, {})
+    var_records = round_map(RUN_ROOT / "bert_var_methoda_a03_r30" / "a03")
+    combo_records = round_map(RUN_ROOT / "bert_var_catv_vq_a03_r30_rerun" / "a03")
+    var_mean_d = mean_optional([record.get("var_D_mean") for record in var_records.values()])
+    combo_mean_d = mean_optional([record.get("var_D_mean") for record in combo_records.values()])
+    combo_mean_c = mean_optional([record.get("vq_channels_mean") for record in combo_records.values()])
+
+    train_a01 = meta_a01["length_stats"]["train"]
+    train_a03 = meta_a03["length_stats"]["train"]
+    payload = {
+        "generated_from": {
+            "run_config": rel(run_dir / "config.json"),
+            "model_config": rel(Path(config["model_dir"]) / "config.json"),
+            "data_meta": ["dataset_v3/arxiv_16k/a01/meta.json",
+                          "dataset_v3/arxiv_16k/a03/meta.json",
+                          "dataset_v3/arxiv_16k/a01/warmup_meta.json"],
+            "note": "Canonical values are from the r30 four-arm BERT run config; variants differ as listed.",
+        },
+        "model": {
+            "name": "distilbert-base-uncased",
+            "task": "11-class arXiv sequence classification",
+            "num_layers": model_config["n_layers"],
+            "num_attention_heads": model_config["n_heads"],
+            "hidden_size": model_config["dim"],
+            "ffn_size": model_config["hidden_dim"],
+            "vocab_size": model_config["vocab_size"],
+            "num_labels": config["num_labels"],
+            "base_max_position_embeddings": model_config["max_position_embeddings"],
+            "position_adaptation": "distilbert_step1/a01_pos_head_1000step/pos_embed.pt (16k)",
+            "classification_head": "distilbert_step1/a01_pos_head_1000step/head.pt (frozen in FL)",
+            "predictor": "predictor_bert/a01_warmup_400step/predictor.pth",
+            "pruned_config": "predictor_bert/a01_warmup_400step/pruned_config.pth",
+            "predictor_tensors": config["predictor_loaded_tensors"],
+            "predictor_zero_filled_tensors": config["predictor_zero_filled_tensors"],
+            "trainable_parameters": config["trainable_params"],
+        },
+        "sequence_and_attention": {
+            "seq_len": config["effective_seq_len"],
+            "truncation": "head_tail",
+            "head_fraction": meta_a01["head_frac"],
+            "head_tokens": int(config["effective_seq_len"] * meta_a01["head_frac"]),
+            "tail_tokens": config["effective_seq_len"] - int(config["effective_seq_len"] * meta_a01["head_frac"]),
+            "padding": "right, pad_token_id=0",
+            "storage_dtype": "uint16",
+            "attention_backend": config["attn"],
+            "sparse_keep_ratio": config["sparse"],
+            "n_blocks": config["n_blocks"],
+            "block_size": config["effective_seq_len"] // config["n_blocks"],
+            "keep_block0": config["keep_block0"],
+            "pruned_layers": "2,3,4 (top-40% query blocks); 0,1 full; 5 exempt",
+            "dtype": config["dtype"],
+        },
+        "lora": {
+            "rank_r": config["lora_r"],
+            "alpha": config["lora_alpha"],
+            "scaling_alpha_over_r": config["lora_alpha"] / config["lora_r"],
+            "dropout": 0.0,
+            "bias": "none",
+            "task_type": "SEQ_CLS",
+            "target_modules": config["lora_targets"],
+            "head_frozen": True,
+            "trainable_parameters": config["trainable_params"],
+            "parameter_formula": "6 layers x 4 modules x (768x1 + 1x768) = 36,864",
+        },
+        "federated": {
+            "trainer": config["trainer"],
+            "clients": config["max_clients"],
+            "local_steps": config["local_steps"],
+            "local_batch_size": 1,
+            "rounds": config["rounds"],
+            "learning_rate": config["lr"],
+            "zo_subspace": config["zo_subspace"],
+            "zo_layers": config["zo_layers"],
+            "zo_directions": config["zo_directions"],
+            "zo_epsilon": config["zo_eps"],
+            "client_update": "ZOO central-difference; immediate update per sample; no optimizer",
+            "server_update": "FedAvg; sample-weighted (all clients have 100 docs -> equal); per-client delta L2-clipped to 1.0 before aggregation",
+            "delta_clip": config["delta_clip"],
+            "weighting": config["weight"],
+            "doc_order": config["doc_order"],
+            "seed": config["seed"],
+            "forwards_per_round": f"{config['max_clients']} clients x {config['local_steps']} samples x {config['zo_directions']} directions x 2 = "
+                                  f"{config['max_clients'] * config['local_steps'] * config['zo_directions'] * 2} forwards",
+        },
+        "evaluation": {
+            "split": "global_test",
+            "samples": config["eval_max_samples"],
+            "batch_size": config["eval_batch_size"],
+            "every_rounds": config["eval_every"],
+            "metrics": "NLL (mean per-sample CE), accuracy, macro-F1",
+        },
+        "data": {
+            "source": meta_a01["source"],
+            "config": meta_a01["config"],
+            "label_names": meta_a01["label_names"],
+            "seq_len": meta_a01["seq_len"],
+            "truncation": meta_a01["truncation"],
+            "head_frac": meta_a01["head_frac"],
+            "pad_token_id": meta_a01["pad_token_id"],
+            "seed": meta_a01["seed"],
+            "global_demo_frac": meta_a01["global_demo_frac"],
+            "train_split_size": meta_a01["counts"]["train_split_size"],
+            "test_split_size": meta_a01["counts"]["test_split_size"],
+            "client_source_size": meta_a01["counts"]["client_source_size"],
+            "global_demo_source_size": meta_a01["counts"]["global_demo_source_size"],
+            "clients": meta_a01["counts"]["clients"],
+            "train_per_client": meta_a01["counts"]["train_per_client"],
+            "local_test_per_client": meta_a01["counts"]["local_test_per_client"],
+            "global_test": meta_a01["counts"]["global_test"],
+            "global_test_role": "random test rows (seed [42,303]); all FL evaluation",
+            "global_train": meta_a01["global_pool"]["train"],
+            "global_train_role": "Step1 position/head training",
+            "global_val": meta_a01["global_pool"]["val"],
+            "global_val_role": "Step1 validation",
+            "global_val_frac": meta_a01["global_pool"]["val_frac"],
+            "warmup": warmup_meta["samples"],
+            "warmup_role": "predictor training (400 steps); disjoint from client/global pools",
+            "excluded_total": warmup_meta["partition"]["excluded_total"],
+            "available_pool": warmup_meta["partition"]["available_pool"],
+            "tags": {
+                "a01": {
+                    "alpha": meta_a01["alpha"],
+                    "train_length_mean": train_a01["mean"],
+                    "train_truncated": train_a01["truncated"],
+                    "train_rows": train_a01["rows"],
+                    "fallback_reuse_total": meta_a01["fallback_reuse"]["total_client_reuse"],
+                },
+                "a03": {
+                    "alpha": meta_a03["alpha"],
+                    "train_length_mean": train_a03["mean"],
+                    "train_truncated": train_a03["truncated"],
+                    "train_rows": train_a03["rows"],
+                    "fallback_reuse_total": meta_a03["fallback_reuse"]["total_client_reuse"],
+                },
+            },
+            "global_split_note": "global_test / global_train / global_val rows are shared across a01/a03; only the client partition differs",
+            "doc_order": "cycle: start = (round * local_steps) % 100; 30 rounds x 8 docs/client = 240 doc-views (~2.4 passes over 100 docs/client)",
+            "fixed_legacy": "fixed (first L rows every round) is the pre-261012 self-loop bug; use cycle for all reported BERT/OPT results",
+            "quirks": [
+                "a01: total_client_reuse=133; client_17 has only 10 unique docs (90 duplicate storage rows)",
+                "a03: total_client_reuse=10 (client_29)",
+                "a01/a03 global_train/global_val/global_test rows are row-identical; alpha only changes client partition",
+            ],
+        },
+        "variants": {
+            "catv_on": {
+                "catv_r": on_config["resolved_catv_r"],
+                "sparse_s": on_config["sparse"],
+                "anchor_in": on_round.get("anchor_in"),
+                "anchor_out": on_round.get("anchor_out"),
+                "normalize_four_arm": on_config["catv_normalize"],
+                "normalize_combo": combo_config["catv_normalize"],
+            },
+            "vq_perresult": {
+                "rate": vq_config["vq_rate"],
+                "sketch_dtype": vq_config["vq_sketch_dtype"],
+                "channels_C": vq_config["vq_channels"],
+                "c_dim": 18432,
+                "total_ratio_vs_one_delta": 32.0,
+            },
+            "var_methoda": {
+                "control": var_config["var_control"],
+                "threshold_T0": var_config["var_threshold"],
+                "D_range": "4..16, even-D checks, no patience",
+                "segment_rounds": var_config["var_segment_rounds"],
+                "probe_clients": var_config["var_probe_clients"],
+                "measured_mean_D": var_mean_d,
+            },
+            "combo": {
+                "catv": combo_config["catv"],
+                "catv_normalize": combo_config["catv_normalize"],
+                "var_control": combo_config["var_control"],
+                "vq_rate": combo_config["vq_rate"],
+                "measured_mean_D": combo_mean_d,
+                "measured_mean_C": combo_mean_c,
+            },
+        },
+        "notes": [
+            "Sequence length 16k requires the learned position table (pos_embed.pt); the base DistilBERT config still says 512.",
+            "Only LoRA parameters are trainable; the Step1 classification head is frozen and not federated.",
+            "The four-arm CATV runs use raw summed votes (catv_normalize=off); the system combo uses per-client L1 normalization (client).",
+            "Do not compare BERT NLL/accuracy with OPT token PPL; see opt_* CSVs for OPT.",
+        ],
+    }
+    return payload
+
+
+def bert_config_markdown(payload):
+    m = payload["model"]
+    s = payload["sequence_and_attention"]
+    l = payload["lora"]
+    f = payload["federated"]
+    e = payload["evaluation"]
+    d = payload["data"]
+    v = payload["variants"]
+    lines = [
+        "# BERT experiment configuration (paper-facing)",
+        "",
+        "由 `reports/bert_and_other/make_report.py` 从实际 `config.json` 与 `dataset_v3/arxiv_16k/*/meta.json` 生成；",
+        "对应 BERT r30 四臂正式口径。机器可读版见 `bert_config.json`。",
+        "",
+        "## 1. Model",
+        "",
+        markdown_table(["item", "value"], [
+            ("model", m["name"]),
+            ("task", m["task"]),
+            ("layers / heads / hidden / FFN", f"{m['num_layers']} / {m['num_attention_heads']} / {m['hidden_size']} / {m['ffn_size']}"),
+            ("vocab / labels", f"{m['vocab_size']} / {m['num_labels']}"),
+            ("position adaptation", m["position_adaptation"]),
+            ("classification head", m["classification_head"]),
+            ("predictor", m["predictor"]),
+            ("pruned config", m["pruned_config"]),
+            ("trainable params", f"{m['trainable_parameters']:,} (LoRA only)"),
+        ]),
+        "",
+        "## 2. Sequence and sparse attention",
+        "",
+        markdown_table(["item", "value"], [
+            ("sequence length", f"{s['seq_len']:,}"),
+            ("truncation", f"{s['truncation']}: {s['head_fraction']:.0%} head + {1 - s['head_fraction']:.0%} tail"),
+            ("head / tail tokens", f"{s['head_tokens']:,} / {s['tail_tokens']:,}"),
+            ("padding", s["padding"]),
+            ("storage dtype", s["storage_dtype"]),
+            ("attention backend", s["attention_backend"]),
+            ("sparse keep ratio s", s["sparse_keep_ratio"]),
+            ("blocks / block size", f"{s['n_blocks']} / {s['block_size']}"),
+            ("pruned layers", s["pruned_layers"]),
+            ("keep block0", s["keep_block0"]),
+            ("compute dtype", s["dtype"]),
+        ]),
+        "",
+        "## 3. LoRA",
+        "",
+        markdown_table(["item", "value"], [
+            ("rank r", l["rank_r"]),
+            ("alpha", l["alpha"]),
+            ("scaling alpha/r", l["scaling_alpha_over_r"]),
+            ("dropout", l["dropout"]),
+            ("bias", l["bias"]),
+            ("task type", l["task_type"]),
+            ("target modules", ", ".join(l["target_modules"])),
+            ("classification head", "frozen (not federated)"),
+            ("trainable params", f"{l['trainable_parameters']:,}"),
+            ("parameter formula", l["parameter_formula"]),
+        ]),
+        "",
+        "## 4. Federated optimization",
+        "",
+        markdown_table(["item", "value"], [
+            ("trainer", f["trainer"]),
+            ("clients", f["clients"]),
+            ("local steps (samples/client/round)", f["local_steps"]),
+            ("local batch size", f["local_batch_size"]),
+            ("rounds", f["rounds"]),
+            ("learning rate", f["learning_rate"]),
+            ("ZOO subspace", f["zo_subspace"]),
+            ("ZOO layers", "0-5"),
+            ("ZOO directions D", f["zo_directions"]),
+            ("ZOO epsilon", f["zo_epsilon"]),
+            ("client update", f["client_update"]),
+            ("server update", f["server_update"]),
+            ("delta clip (L2)", f["delta_clip"]),
+            ("weighting", f["weighting"]),
+            ("doc order", f["doc_order"]),
+            ("seed", f["seed"]),
+            ("forwards per round", f["forwards_per_round"]),
+        ]),
+        "",
+        "## 5. Data construction",
+        "",
+        markdown_table(["item", "value"], [
+            ("source", f"{d['source']} [{d['config']}]"),
+            ("classes", ", ".join(d["label_names"])),
+            ("data root", "dataset_v3/arxiv_16k/{a01,a03}"),
+            ("sequence length", f"{d['seq_len']:,}"),
+            ("truncation", f"{d['truncation']}, head_frac={d['head_frac']}"),
+            ("partition", "per-class Dirichlet"),
+            ("alpha", f"a01={d['tags']['a01']['alpha']}, a03={d['tags']['a03']['alpha']}"),
+            ("partition seed", d["seed"]),
+            ("clients", d["clients"]),
+            ("train / local-test per client", f"{d['train_per_client']} / {d['local_test_per_client']}"),
+            ("global test", f"{d['global_test']} — {d['global_test_role']}"),
+            ("global train / val", f"{d['global_train']} / {d['global_val']} — Step1 position/head train / val"),
+            ("warmup", f"{d['warmup']} — predictor training (400 steps), disjoint"),
+            ("global_demo_frac", d["global_demo_frac"]),
+            ("global_val_frac", d["global_val_frac"]),
+            ("train / test split size", f"{d['train_split_size']} / {d['test_split_size']}"),
+            ("client source / held-out", f"{d['client_source_size']} / {d['global_demo_source_size']}"),
+            ("excluded / available pool", f"{d['excluded_total']} / {d['available_pool']}"),
+            ("doc order", d["doc_order"]),
+        ]),
+        "",
+        "| tag | train rows | mean length | truncated at 16k | fallback reuse |",
+        "|---|---:|---:|---:|---:|",
+        f"| a01 | {d['tags']['a01']['train_rows']} | {d['tags']['a01']['train_length_mean']} | {d['tags']['a01']['train_truncated']} | {d['tags']['a01']['fallback_reuse_total']} |",
+        f"| a03 | {d['tags']['a03']['train_rows']} | {d['tags']['a03']['train_length_mean']} | {d['tags']['a03']['train_truncated']} | {d['tags']['a03']['fallback_reuse_total']} |",
+        "",
+        f"- Global split: {d['global_split_note']}.",
+        f"- `warmup`: {d['warmup']} samples, disjoint from client/global pools.",
+        "- Data quirks:",
+    ]
+    for quirk in d["quirks"]:
+        lines.append(f"  - {quirk}")
+    lines += [
+        "",
+        "## 6. Evaluation",
+        "",
+        markdown_table(["item", "value"], [
+            ("split", e["split"]),
+            ("samples", e["samples"]),
+            ("batch size", e["batch_size"]),
+            ("cadence", f"every {e['every_rounds']} round(s)"),
+            ("metrics", e["metrics"]),
+        ]),
+        "",
+        "## 7. Variants",
+        "",
+        markdown_table(["variant", "key settings"], [
+            ("CATV on (four-arm)", f"r={v['catv_on']['catv_r']}, s={v['catv_on']['sparse_s']}, "
+                                    f"anchors {v['catv_on']['anchor_in']}/{v['catv_on']['anchor_out']}, "
+                                    f"normalize={v['catv_on']['normalize_four_arm']}"),
+            ("VQ per-result", f"rate={v['vq_perresult']['rate']}, {v['vq_perresult']['sketch_dtype']}, "
+                              f"C={v['vq_perresult']['channels_C']}, c_dim={v['vq_perresult']['c_dim']}, "
+                              f"total={v['vq_perresult']['total_ratio_vs_one_delta']}x one delta"),
+            ("VAR Method A", f"control={v['var_methoda']['control']}, T0={v['var_methoda']['threshold_T0']}, "
+                             f"{v['var_methoda']['D_range']}, segments={v['var_methoda']['segment_rounds']} rounds, "
+                             f"probe={v['var_methoda']['probe_clients']} clients, mean D={v['var_methoda']['measured_mean_D']:.3f}"),
+            ("Combo", f"CATV={v['combo']['catv']} ({v['combo']['catv_normalize']}), VAR={v['combo']['var_control']}, "
+                      f"VQ={v['combo']['vq_rate']}, mean D={v['combo']['measured_mean_D']:.3f}, "
+                      f"mean C={v['combo']['measured_mean_C']:.2f}"),
+        ]),
+        "",
+        "## 8. Notes",
+        "",
+    ]
+    for note in payload["notes"]:
+        lines.append(f"- {note}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def bert_config_package(out_root):
+    payload = bert_config_payload()
+    (Path(out_root) / "bert_config.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (Path(out_root) / "BERT_CONFIG.md").write_text(
+        bert_config_markdown(payload), encoding="utf-8")
+    return payload
+
+
 def provenance_package(r30, bpp, ldp, lr_scan, opt):
     rows = []
 
@@ -1422,6 +1791,9 @@ def readme_text(file_counts, checks):
     for name, purpose, source in FILE_NOTES:
         lines.append(f"| `data/{name}` | {file_counts.get(name, 0)} | {purpose} | {source} |")
     lines.append("")
+    lines.append("配置（论文侧直接引用）：`BERT_CONFIG.md` 是 BERT r30 四臂的可读配置表（序列长度、LoRA、local steps、lr、数据构造、变体）；")
+    lines.append("`bert_config.json` 是同一内容的机器可读版，均由实际 `config.json` + `meta.json` 生成。")
+    lines.append("")
     lines.append("## 口径")
     lines.append("")
     lines.append("- `nll` = global_test 上的逐样本交叉熵均值（BERT 分类 NLL），不是 PPL；")
@@ -1540,6 +1912,7 @@ def main():
     combo_evaloff = combo_evaloff_package()
     tech = technique_package(vq, var, combo, combo_evaloff, r30)
     baselines_package()
+    bert_config_package(out_root)
     provenance_package(r30, bpp, ldp, lr_scan, opt)
     excluded_package()
 

@@ -1,0 +1,200 @@
+{
+  "generated_from": {
+    "run_config": "logs/fed/bert_da_fixed/r30_a03_catv_off/a03/config.json",
+    "model_config": "third_party/Jenga/checkpoints/distilbert-base-uncased/config.json",
+    "data_meta": [
+      "dataset_v3/arxiv_16k/a01/meta.json",
+      "dataset_v3/arxiv_16k/a03/meta.json",
+      "dataset_v3/arxiv_16k/a01/warmup_meta.json"
+    ],
+    "note": "Canonical values are from the r30 four-arm BERT run config; variants differ as listed."
+  },
+  "model": {
+    "name": "distilbert-base-uncased",
+    "task": "11-class arXiv sequence classification",
+    "num_layers": 6,
+    "num_attention_heads": 12,
+    "hidden_size": 768,
+    "ffn_size": 3072,
+    "vocab_size": 30522,
+    "num_labels": 11,
+    "base_max_position_embeddings": 512,
+    "position_adaptation": "distilbert_step1/a01_pos_head_1000step/pos_embed.pt (16k)",
+    "classification_head": "distilbert_step1/a01_pos_head_1000step/head.pt (frozen in FL)",
+    "predictor": "predictor_bert/a01_warmup_400step/predictor.pth",
+    "pruned_config": "predictor_bert/a01_warmup_400step/pruned_config.pth",
+    "predictor_tensors": 36,
+    "predictor_zero_filled_tensors": 36,
+    "trainable_parameters": 36864
+  },
+  "sequence_and_attention": {
+    "seq_len": 16384,
+    "truncation": "head_tail",
+    "head_fraction": 0.75,
+    "head_tokens": 12288,
+    "tail_tokens": 4096,
+    "padding": "right, pad_token_id=0",
+    "storage_dtype": "uint16",
+    "attention_backend": "sdpa_prune",
+    "sparse_keep_ratio": 0.4,
+    "n_blocks": 256,
+    "block_size": 64,
+    "keep_block0": true,
+    "pruned_layers": "2,3,4 (top-40% query blocks); 0,1 full; 5 exempt",
+    "dtype": "fp32"
+  },
+  "lora": {
+    "rank_r": 1,
+    "alpha": 2.0,
+    "scaling_alpha_over_r": 2.0,
+    "dropout": 0.0,
+    "bias": "none",
+    "task_type": "SEQ_CLS",
+    "target_modules": [
+      "q_lin",
+      "k_lin",
+      "v_lin",
+      "out_lin"
+    ],
+    "head_frozen": true,
+    "trainable_parameters": 36864,
+    "parameter_formula": "6 layers x 4 modules x (768x1 + 1x768) = 36,864"
+  },
+  "federated": {
+    "trainer": "zoo",
+    "clients": 30,
+    "local_steps": 8,
+    "local_batch_size": 1,
+    "rounds": 30,
+    "learning_rate": 0.0014,
+    "zo_subspace": "layers",
+    "zo_layers": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "zo_directions": 8,
+    "zo_epsilon": 0.001,
+    "client_update": "ZOO central-difference; immediate update per sample; no optimizer",
+    "server_update": "FedAvg; sample-weighted (all clients have 100 docs -> equal); per-client delta L2-clipped to 1.0 before aggregation",
+    "delta_clip": 1.0,
+    "weighting": "samples",
+    "doc_order": "cycle",
+    "seed": 0,
+    "forwards_per_round": "30 clients x 8 samples x 8 directions x 2 = 3840 forwards"
+  },
+  "evaluation": {
+    "split": "global_test",
+    "samples": 500,
+    "batch_size": 8,
+    "every_rounds": 1,
+    "metrics": "NLL (mean per-sample CE), accuracy, macro-F1"
+  },
+  "data": {
+    "source": "ccdv/arxiv-classification",
+    "config": "no_ref",
+    "label_names": [
+      "math.AC",
+      "cs.CV",
+      "cs.AI",
+      "cs.SY",
+      "math.GR",
+      "cs.CE",
+      "cs.PL",
+      "cs.IT",
+      "cs.DS",
+      "cs.NE",
+      "math.ST"
+    ],
+    "seq_len": 16384,
+    "truncation": "head_tail",
+    "head_frac": 0.75,
+    "pad_token_id": 0,
+    "seed": 42,
+    "global_demo_frac": 0.15,
+    "train_split_size": 28388,
+    "test_split_size": 2500,
+    "client_source_size": 24130,
+    "global_demo_source_size": 4258,
+    "clients": 30,
+    "train_per_client": 100,
+    "local_test_per_client": 16,
+    "global_test": 500,
+    "global_test_role": "random test rows (seed [42,303]); all FL evaluation",
+    "global_train": 3832,
+    "global_train_role": "Step1 position/head training",
+    "global_val": 426,
+    "global_val_role": "Step1 validation",
+    "global_val_frac": 0.1,
+    "warmup": 512,
+    "warmup_role": "predictor training (400 steps); disjoint from client/global pools",
+    "excluded_total": 7605,
+    "available_pool": 20783,
+    "tags": {
+      "a01": {
+        "alpha": 0.1,
+        "train_length_mean": 12047.4,
+        "train_truncated": 1034,
+        "train_rows": 3000,
+        "fallback_reuse_total": 133
+      },
+      "a03": {
+        "alpha": 0.3,
+        "train_length_mean": 12012.5,
+        "train_truncated": 1032,
+        "train_rows": 3000,
+        "fallback_reuse_total": 10
+      }
+    },
+    "global_split_note": "global_test / global_train / global_val rows are shared across a01/a03; only the client partition differs",
+    "doc_order": "cycle: start = (round * local_steps) % 100; 30 rounds x 8 docs/client = 240 doc-views (~2.4 passes over 100 docs/client)",
+    "fixed_legacy": "fixed (first L rows every round) is the pre-261012 self-loop bug; use cycle for all reported BERT/OPT results",
+    "quirks": [
+      "a01: total_client_reuse=133; client_17 has only 10 unique docs (90 duplicate storage rows)",
+      "a03: total_client_reuse=10 (client_29)",
+      "a01/a03 global_train/global_val/global_test rows are row-identical; alpha only changes client partition"
+    ]
+  },
+  "variants": {
+    "catv_on": {
+      "catv_r": 0.2,
+      "sparse_s": 0.4,
+      "anchor_in": 51,
+      "anchor_out": 51,
+      "normalize_four_arm": "off",
+      "normalize_combo": "client"
+    },
+    "vq_perresult": {
+      "rate": 0.5,
+      "sketch_dtype": "bf16",
+      "channels_C": 64,
+      "c_dim": 18432,
+      "total_ratio_vs_one_delta": 32.0
+    },
+    "var_methoda": {
+      "control": "on",
+      "threshold_T0": 0.587230920791626,
+      "D_range": "4..16, even-D checks, no patience",
+      "segment_rounds": 10,
+      "probe_clients": 8,
+      "measured_mean_D": 8.790555555555557
+    },
+    "combo": {
+      "catv": "on",
+      "catv_normalize": "client",
+      "var_control": "on",
+      "vq_rate": 0.5,
+      "measured_mean_D": 9.002777777777776,
+      "measured_mean_C": 72.02222222222221
+    }
+  },
+  "notes": [
+    "Sequence length 16k requires the learned position table (pos_embed.pt); the base DistilBERT config still says 512.",
+    "Only LoRA parameters are trainable; the Step1 classification head is frozen and not federated.",
+    "The four-arm CATV runs use raw summed votes (catv_normalize=off); the system combo uses per-client L1 normalization (client).",
+    "Do not compare BERT NLL/accuracy with OPT token PPL; see opt_* CSVs for OPT."
+  ]
+}

@@ -27,7 +27,7 @@ src/        新代码全部写这里（third_party 只读，允许 COPY 进 src/
   eval/     ppl.py、classify.py   bench/memory.py   hello_world.py(环境自检)
 scripts/    setup_server.sh、run_ablation_cloud.sh、hello-world.sh、diag_cos_*.py、paired_eval.py
 third_party/ 只读 submodule：FwdLLM / Jenga(OPT+数据+权重) / VQ(Count Sketch)
-reports/    交付包（git 跟踪）：reports/opt/ = OPT 图/表/报告；reports/bert_and_other/ = BERT + OPT fixed 自循环修复后（cycle）CSV+README（无图）；入口各自 make_report.py
+reports/    交付包（git 跟踪）：reports/opt/ = OPT 图/表/报告；reports/bert_and_other/ = BERT + OPT fixed 自循环修复后（cycle）CSV+README+BERT_CONFIG（无图）；入口各自 make_report.py
 docs/       standard.md、weight-manifest.md、ailog/、paper/evaluation/redundancy/、old_ailog/、reference/(gitignore)
 dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 ```
@@ -56,6 +56,7 @@ dataset_v3/ checkpoints/ logs/ temp/   运行时目录，gitignore
 
 - `reports/opt/make_report.py` → `reports/opt/`：OPT 图+表（论文用）。
 - `reports/bert_and_other/make_report.py` → `reports/bert_and_other/`：BERT + OPT fixed post-cycle CSV+README，**不生成图**（图由论文 Agent 统一生成）。OPT fixed 四臂（`logs/fed/opt_r30_fixed`）已并入，与 `reports/opt/` 旧图表口径不同。
+- `reports/bert_and_other/BERT_CONFIG.md` / `bert_config.json`：论文用 BERT 配置表（序列长度、LoRA、local steps、lr、数据构造、变体），由实际 `config.json` + `meta.json` 生成。
 - `reports/bert_and_other/data/provenance.csv` 逐 run 列原始路径/状态；`excluded_runs.csv` 列禁用/partial/diagnostic run。
 - 两个包都由脚本自动生成，内置 ailog 对账闸门；**不要手改 CSV/README 数字**。BERT 包命令：
   `$PY reports/bert_and_other/make_report.py`（`--no-check` 仅调试）。
@@ -218,6 +219,7 @@ bash -n scripts/setup_server.sh scripts/run_ablation_cloud.sh
 | `docs/ailog/261022-140026-...var-vq-catv-stage-handoff.md` | **本阶段总交接**：VQ per-result / VAR Method A / CATV client / 组合 + eval-off；先读 |
 | `docs/ailog/261022-141526-...bert-post-cycle-report-package.md` | **BERT post-cycle CSV 包（初版）**：18 个 CSV、范围、62/62 对账 |
 | `docs/ailog/261022-142500-...opt-fixed-into-report-package.md` | **OPT fixed 并入**：7 个 OPT CSV、25 个 CSV/99/99 对账；写 OPT 表先看 |
+| `docs/ailog/261022-151641-...bert-config-sheet.md` | **论文用 BERT config**：seq/LoRA/local steps/lr/数据构造/变体；`BERT_CONFIG.md` + `bert_config.json` |
 | `docs/ailog/261021-111547-...var-segmented-threshold-method-a.md` | **VAR Method A 拍板**：raw var、D=4..16、r10/r20 探针；pool 仅诊断 |
 | `docs/ailog/261021-194500-...var-catv-vq-system-eval.md` | **组合系统评测**：VAR+CATV(client)+VQ 0.5；eval-off 分解 |
 | `docs/ailog/261020-162000-...vq-per-result.md` | **VQ per-result**：`c_dim=rate*d`、`C=L*D`、bf16 |
