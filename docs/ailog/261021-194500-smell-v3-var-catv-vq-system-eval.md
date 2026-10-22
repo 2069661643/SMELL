@@ -51,3 +51,22 @@
   `dense_all_results_communication_bytes`，不能拿旧的固定 C=64 口径。
 - 组合 run 的 VAR 阈值仍按 Method A 的 T0/探针；CATV mask 会改变 loss/gradient，D 分布可能不同。
 EOF
+
+## 六、最终结果（261022 08:16）
+
+- 完成 30/30；r29 **NLL 1.559838 / acc 0.450**。
+- 对照：
+  - CATV on 基线（historical，`off` 归一化）：1.548441 / 0.454 → **ΔNLL +0.011398**（t=4.44，p=9.1e-6），acc −0.4 pt；
+  - CATV off 基线：1.588699 / 0.466 → ΔNLL −0.028861（p=0.039），acc −1.6 pt。
+- 实际 VAR：mean D **9.003**、samples **72.0**（目标 64）；hit_low 2896/7200（40.2%）、
+  hit_high 2128/7200（29.6%）。探针 T10=0.611885（meanD 7.906），T20=2.210161（meanD 8.0）。
+- VQ：mean C=**72.02**、cos=**0.99456**、`vq_ratio_bytes=0.5`；
+  r29 VQ 75.4MB vs per-result dense 150.8MB（0.5）；相对一条 delta 仍是 ~34×。
+- CATV：anchor 51/51，IR mean 0.922，`catv_normalize=client` 已生效。
+- 单轮均值 903.2s；总耗时 23:57→08:16（~8.3h）。
+- 归档：`checkpoints/distilbert_var_catv_vq_a03_r30_rerun/`
+  adapter sha256 `d537b37eef4f1ab632fe962d2a1e1e5b2adf25cd5c7a80550308498a721a9c3a`。
+
+**口径 caveat**：历史 CATV on 基线是 `--catv-normalize off`；本组合是 `client`，且叠加 VAR+VQ。
+因此 +0.0114 NLL 不能单独归因于 VAR 或 VQ；若要干净归因，需要补一个 **CATV on + client 归一化、
+VAR/VQ off** 的匹配基线（约 +7h）。

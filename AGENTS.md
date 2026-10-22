@@ -117,7 +117,7 @@ $PY src/fed/run_fed.py --arch distilbert --tag a01 --gpu 0 --trainer zoo \
 - **Method A 分段**：r0–r9 用 T0；r10/r20 各跑 **8 clients × 8 samples** 探针（固定 global model、不更新、cycle 当前 cursor），用 raw var 选 T10/T20（mean D≤8 最接近 8）；写 `var_probe_roundNNN.jsonl` / `var_thresholds.json`。`--var-segment-rounds 10`、`--var-probe-clients 8`。
 - **CLI**：`--var-control {on,off}` 默认 off；`--var-threshold` 默认 **0.587230920791626**（T0）；`--var-diagnose` 仅标定用。
 - **正式**：BERT a03、CATV off、VQ off、L=8、r30、eval 500；基线 a03 off r29 = **1.588699 / 0.466**。run：`logs/fed/bert_var_methoda_a03_r30/`；归档：`checkpoints/distilbert_var_methoda_a03_r30/`。
-- **组合系统评测（挂在其后）**：VAR ON + CATV ON + VQ 0.5 bf16，BERT a03、L8、r30；chain `temp/run_chain_methoda_to_combo_bg.sh`，run `logs/fed/bert_var_catv_vq_a03_r30/`，archive `checkpoints/distilbert_var_catv_vq_a03_r30/`。CATV votes 按 forward 计权（D 变）；VQ `C_i=sum(D)`。
+- **组合系统评测（已完成 261022）**：VAR ON + CATV ON（`client` 归一化）+ VQ 0.5 bf16，BERT a03、L8、r30；r29 **1.559838 / 0.450**；vs CATV on 历史基线 1.548441/0.454 → **+0.0114 NLL（p=9.1e-6）**；vs CATV off 1.588699/0.466 → −0.0289 NLL（但 acc −1.6pt）。mean D 9.003（samples 72.0，目标 64）、VQ mean C 72.02、cos 0.99456、ratio_bytes 0.5。run `logs/fed/bert_var_catv_vq_a03_r30_rerun/`，archive `checkpoints/distilbert_var_catv_vq_a03_r30_rerun/`（sha `d537b37e...`）。**caveat**：历史 CATV on 基线是 `off` 归一化，组合是 `client` + VAR + VQ；+0.0114 NLL 不能单独归因。
 - **旧 pool VAR（诊断）**：r29 1.590681 / 0.462 vs 基线 1.588699 / 0.466（Δ +0.001982，p=0.0739）；平均 samples 91.9；归档 `checkpoints/distilbert_var_a03_r30/`。不作最终结果。
 - **风险**：raw var 非单调，D=4 可能假早停（标定 51% hit_low）；探针只有 8 clients，T10/T20 有噪声。若段末 D_mean 明显偏离 8 或 hit_low/high 过多，再讨论 patience / min D=6。
 - 详见 `docs/ailog/261021-111547-smell-v3-var-segmented-threshold-method-a.md`。

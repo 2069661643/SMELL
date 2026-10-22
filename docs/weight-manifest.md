@@ -155,3 +155,20 @@ cd <dest>/SMELLv3 && sha256sum \
 
 - 旧 total 口径的 0.25 fp32 partial：`checkpoints/distilbert_vq025_a03_r20_partial/`（仅历史，勿与新架构混比）。
 - 旧 total 口径的 0.5 bf16 partial：`checkpoints/distilbert_vq050_bf16_a03_r0_partial/`（仅历史）。
+
+## 9. BERT VAR+CATV+VQ 组合系统评测 r30（a03；261022）
+
+> 配置：VAR Method A（raw var、min D=4、no patience、T0=0.5872309208、r10/r20 探针）、CATV on（`--catv-normalize client`，每 client 每层 L1）、VQ rate 0.5 bf16（per-result，`C_i=sum(D)`）、L=8、r30、eval 500。
+> 结果：r29 **NLL 1.559838 / acc 0.450**；vs CATV on 历史基线 1.548441/0.454 → **ΔNLL +0.011398**（t=4.44，p=9.1e-6）；vs CATV off 1.588699/0.466 → −0.028861（p=0.039，acc −1.6pt）。
+> VAR：mean D 9.003、samples 72.0；hit_low 2896/7200、hit_high 2128/7200；T10=0.611885、T20=2.210161。
+> VQ：mean C 72.02、cos 0.99456、ratio_bytes 0.5；r29 75.4MB vs per-result dense 150.8MB。
+
+`checkpoints/distilbert_var_catv_vq_a03_r30_rerun/`（adapter_round029 + metrics + config + vq_seeds + var_thresholds + var_probe_round010/020 + SHA256SUMS）：
+
+| 文件 | sha256 |
+|---|---|
+| `adapter_round029/adapter_model.safetensors` | `d537b37eef4f1ab632fe962d2a1e1e5b2adf25cd5c7a80550308498a721a9c3a` |
+| `adapter_round029/adapter_config.json` | `ce404fc8fda832620b6e0286fbc9b33ee723e556210a278b9f0ec18f1aa603fc` |
+
+- 口径 caveat：历史 CATV on 基线是 `--catv-normalize off`；本组合是 `client` + VAR + VQ，+0.0114 NLL 不能单独归因。
+- 旧异常终止 partial（r0–r5）：`checkpoints/distilbert_var_catv_vq_a03_r6_partial/`，仅历史。
