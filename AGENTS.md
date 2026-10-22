@@ -203,7 +203,10 @@ bash -n scripts/setup_server.sh scripts/run_ablation_cloud.sh
 | 文件 | 内容 |
 |---|---|
 | `docs/weight-manifest.md`（非 ailog） | **换机交接**：权重/数据路径 + sha256 + OPT/BERT 运行 flags |
-| `docs/ailog/261021-095531-...var-per-sample-plan-and-schedule-discussion.md` | **VAR 拍板方案**：per-sample、D=2..16、mean8、no patience；当前 pool 级仅诊断 |
+| `docs/ailog/261022-140026-...var-vq-catv-stage-handoff.md` | **本阶段总交接**：VQ per-result / VAR Method A / CATV client / 组合 + eval-off；先读 |
+| `docs/ailog/261021-111547-...var-segmented-threshold-method-a.md` | **VAR Method A 拍板**：raw var、D=4..16、r10/r20 探针；pool 仅诊断 |
+| `docs/ailog/261021-194500-...var-catv-vq-system-eval.md` | **组合系统评测**：VAR+CATV(client)+VQ 0.5；eval-off 分解 |
+| `docs/ailog/261020-162000-...vq-per-result.md` | **VQ per-result**：`c_dim=rate*d`、`C=L*D`、bf16 |
 | `docs/ailog/261020-090000-...opt-r30-fixed-results-catv-mask-alpha.md` | **OPT r30 fixed 四臂 + r0 补测**：CATV 为掩码主导、α 依赖 |
 | `docs/ailog/261015-213000-...bert-r30-fixed-four-arm-results.md` | **BERT r30 fixed 四臂**：CATV 显著；weight/mask 分解 |
 | `docs/ailog/261014-111800-...bert-catv-padding-vote-artifact-fix-handoff.md` | BERT CATV padding 伪影 + valid-mean/block0 修复 |
