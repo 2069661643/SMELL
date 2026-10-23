@@ -185,7 +185,7 @@ cd <dest>/SMELLv3 && sha256sum \
 
 > 架构：`--vq-channels-mode per_client`（261023 起默认）——每 client 只对**最终 delta** 压 **1 条** sketch；`c_dim = rate*d_active` **不变**、`rate=0.5`、bf16、rescale on、seed 0；30 clients → **30 channel/轮**。
 > 配置：a03、CATV off、VAR off、L8/D8、lr=1.4e-3、clip=1.0、cycle、r30、eval 500。
-> 结果：r0 1.690728 / acc 0.424 → r29 **1.627351 / acc 0.448**（−3.75%）；同轮无 VQ a03 off = 1.588699 / 0.466 → 配对 ΔNLL **+0.038662**（t=7.75，p=9.55e-15，n=500）、acc −1.8pt。
+> 结果：r0 1.690814 / acc 0.424 → r29 **1.627393 / acc 0.448**（−3.75%）；同轮无 VQ a03 off = 1.588699 / 0.466 → 配对 ΔNLL **+0.038694**（t=7.745，p=9.55e-15，n=500）、acc −1.8pt。
 > VQ：`vq_channels=1`、`vq_channels_total=30`、`vq_cos_mean=0.7060`、`vq_ratio_bytes=0.5`、`vq_communication_bytes=1,105,920 B/round` vs `dense_all_results=2,211,840 B/round`（0.5× 最终 delta；比 per-result 少 64×）。
 > 训练 6.45h（773s/轮），与 VQ-off/per-result 相同。
 
