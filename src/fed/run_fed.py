@@ -86,6 +86,10 @@ def parse_args():
                         help="rescale decompressed client delta to its post-clip L2 norm")
     parser.add_argument("--vq-channels", type=int, default=0,
                         help="override channel count; 0 = local_steps * zo_directions (ZOO)")
+    # SMELL 3 run_fed vq_perclient ADD — 每 client 的 channel 语义：per_client=只压最终 delta 一条（旧压缩比，30 clients→30 channel）
+    parser.add_argument("--vq-channels-mode", choices=("per_client", "per_result"), default="per_client",
+                        help="per_client = 1 sketch per client over the final delta (old ratio); "
+                             "per_result = legacy L*D per-result channels")
     parser.add_argument("--vq-seed", type=int, default=None,
                         help="hash/sign seed base; default = --seed (shared by all clients)")
     parser.add_argument("--vq-sketch-dtype", choices=("bf16", "fp32"), default="bf16",
@@ -359,9 +363,16 @@ def scatter_delta(flat, template, active_index=None):
 
 
 def resolve_vq_channels(args):
-    """ZOO 的 channel 数：每个中心差分方向样本 1 channel（C=local_steps*zo_directions）。"""
+    """每 client 的 channel 数。
+
+    per_client（默认，旧口径）：只对 client **最终 delta** 压 1 条 sketch（30 clients → 30 channel/轮）；
+    per_result（历史）：每个中心差分方向样本 1 channel（C=local_steps*zo_directions）。
+    显式 --vq-channels > 0 时仍可覆盖（仅诊断）。
+    """
     if int(args.vq_channels) > 0:
         return int(args.vq_channels)
+    if getattr(args, "vq_channels_mode", "per_client") == "per_client":
+        return 1
     return int(args.local_steps) * int(args.zo_directions)
 
 
@@ -628,7 +639,7 @@ def main():
         raise SystemExit(f"--vq-bytes-per-element must be >= 0 (0=auto), got {args.vq_bytes_per_element}")
     if args.vq_rate < 1.0:
         if args.trainer != "zoo":
-            raise SystemExit("--vq-rate < 1 is ZOO-only (channels = local_steps * zo_directions)")
+            raise SystemExit("--vq-rate < 1 is ZOO-only (per_client: 1 channel/client; per_result: local_steps*zo_directions)")
         if args.local_steps <= 0:
             raise SystemExit(f"--vq-rate < 1 requires --local-steps > 0, got {args.local_steps}")
         if args.zo_directions <= 0:
@@ -648,8 +659,8 @@ def main():
             raise SystemExit(f"var control requires --local-steps > 0, got {args.local_steps}")
         if args.catv == "on":
             print("[fed] WARN var control + CATV: per-sample D varies; votes are per-forward and may be sample-weighted")
-        if args.vq_rate < 1.0:
-            print("[fed] WARN var control + VQ: per-client C=sum(D); per-result compression uses variable channel counts")
+        if args.vq_rate < 1.0 and args.vq_channels_mode == "per_result":
+            print("[fed] WARN var control + VQ: per-result compression uses variable channel counts (C=sum(D))")
         if not args.var_diagnose and args.var_threshold <= 0.0:
             raise SystemExit("--var-control on requires --var-threshold > 0 (or --var-diagnose)")
         if args.var_segment_rounds < 0:
@@ -913,10 +924,16 @@ def main():
         "predictor_zero_filled_tensors": predictor_zero_filled,
         # SMELL 3 run_fed vq ADD — 上行压缩参数（rate=1 时 channels/c_dim 不生效）
         "vq_rate": args.vq_rate,
-        "vq_channels": (None if (args.vq_rate < 1.0 and args.var_control == "on")
+        "vq_channels": (None if (args.vq_rate < 1.0
+                                 and args.vq_channels_mode == "per_result"
+                                 and args.var_control == "on")
                         else (resolve_vq_channels(args) if args.vq_rate < 1.0 else None)),
-        "vq_channels_mode": ("per_client" if (args.vq_rate < 1.0 and args.var_control == "on")
-                             else ("fixed" if args.vq_rate < 1.0 else None)),
+        # SMELL 3 run_fed vq_perclient ADD — 压缩粒度（per_client=1/客户端，旧口径）与 VAR 下的 channel 可变性
+        "vq_channels_mode": (args.vq_channels_mode if args.vq_rate < 1.0 else None),
+        "vq_channel_variability": ("per_client_var"
+                                   if (args.vq_rate < 1.0 and args.var_control == "on"
+                                       and args.vq_channels_mode == "per_result")
+                                   else ("fixed" if args.vq_rate < 1.0 else None)),
         "vq_rescale": args.vq_rescale,
         "vq_sketch_dtype": args.vq_sketch_dtype,
         "vq_seed": args.vq_seed if args.vq_seed is not None else args.seed,
@@ -983,7 +1000,36 @@ def main():
             # SMELL 3 run_fed vq_per_result MODIFIED — 每条训练结果单独上传：c_dim=rate*dense。
             vq_c_dim = max(1, int(args.vq_rate * comm_params))
             vq_actual_rate = vq_c_dim / float(comm_params)
-            if vq_var:
+            if args.vq_channels_mode == "per_client":
+                # SMELL 3 run_fed vq_perclient ADD — 旧压缩比：每 client 最终 delta 只压 1 条（30 clients → 30 channel）
+                vq_channels = resolve_vq_channels(args)
+                vq_total_rate = vq_channels * vq_c_dim / float(comm_params)
+                vq = CountSketch(comm_params, vq_channels, vq_c_dim,
+                                 seed=(args.vq_seed if args.vq_seed is not None else args.seed),
+                                 device=model.device)
+                vq_max_channels = vq_channels
+                if round_idx == 0:
+                    seed_payload = {
+                        "round": round_idx,
+                        "active_dim": comm_params,
+                        "channels": vq_channels,
+                        "channels_mode": "per_client",
+                        "c_dim": vq_c_dim,
+                        "actual_rate": vq_actual_rate,
+                        "total_ratio_elements": vq_total_rate,
+                        "sketch_dtype": args.vq_sketch_dtype,
+                        "bytes_per_element": resolve_vq_bytes_per_element(args),
+                        "seed": args.vq_seed if args.vq_seed is not None else args.seed,
+                        "hash_seeds": vq.hash_seeds,
+                        "sigma_seeds": vq.sigma_seeds,
+                    }
+                    (out_dir / "vq_seeds.json").write_text(
+                        json.dumps(seed_payload, indent=2), encoding="utf-8")
+                print(f"[fed] vq round {round_idx} rate={args.vq_rate} channels={vq_channels} "
+                      f"(per_client) c_dim={vq_c_dim} active_dim={comm_params} "
+                      f"ratio_elements={vq_actual_rate:.6f} total_ratio={vq_total_rate:.4f} "
+                      f"sketch={args.vq_sketch_dtype} bytes/elem={resolve_vq_bytes_per_element(args)}")
+            elif vq_var:
                 # VAR ON：每条 client 的结果数 = sum(D)，C_i 逐 client 变化。
                 # seed 序列按 max_channels=128 生成；C_i 使用其前缀。
                 seed_compressor = CountSketch(
@@ -1169,7 +1215,9 @@ def main():
             vq_client_bytes = 0
             vq_client_channels = 0
             if vq_enabled:
-                if vq_var:
+                # SMELL 3 run_fed vq_perclient MODIFIED — per_client：所有 client 共用同一条 1-channel compressor（最终 delta）；
+                # per_result：沿用逐结果 channel 数（VAR 下 C_i=sum(D)）
+                if vq_var and args.vq_channels_mode == "per_result":
                     vq_client_channels = int(result.get("var_total_samples") or 0)
                     assert vq_client_channels > 0, (
                         f"var+VQ client {name} has 0 training results")
@@ -1334,6 +1382,9 @@ def main():
             "vq_channels_mean": vq_channels_mean if vq_enabled else None,
             "vq_channels_min": min(vq_channels_all) if vq_channels_all else None,
             "vq_channels_max": max(vq_channels_all) if vq_channels_all else None,
+            # SMELL 3 run_fed vq_perclient ADD — 本轮总 channel 数（per_client 模式 = num_clients）与粒度
+            "vq_channels_total": (int(sum(vq_channels_all)) if vq_enabled else None),
+            "vq_channels_mode": (args.vq_channels_mode if vq_enabled else None),
             "vq_c_dim": vq_c_dim if vq_enabled else None,
             "vq_active_dim": comm_params if vq_enabled else None,
             "vq_actual_rate": vq_actual_rate if vq_enabled else None,

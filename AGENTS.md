@@ -96,15 +96,16 @@ $PY src/fed/run_fed.py --arch opt --tag a01 --gpu 2 \
 
 - 入口：`src/compress/count_sketch.py`；`--vq-rate` 默认 **1.0 = 关闭**，`0<rate<1` 开启。**仅 ZOO**；`--trainer bp --vq-rate<1` 直接报错。
 - `--vq-sketch-dtype {bf16,fp32}` 默认 **bf16**（内部 bucket 累加仍 fp32，传输前 cast）；`--vq-bytes-per-element 0` = auto（bf16=2B，fp32=4B）。
-- **rate 口径 = per-result**：`c_dim = max(1, floor(rate * d_active))`，**不除以 channel 数**。`--vq-rate` 默认 1=off。
+- **rate 口径 = per_client（261023 起默认）**：`--vq-channels-mode per_client` = 每 client 只对**最终 delta** 压 **1 条** sketch（30 clients → **30 channel/轮**，旧压缩比：`vq_ratio_bytes = c_dim*bytes/(d*2) = rate`）；`c_dim = max(1, floor(rate * d_active))`，**不除以 channel 数**。`--vq-rate` 默认 1=off。
+- **legacy `per_result`**：每中心差分结果 1 channel（`C=local_steps*zo_directions`，VAR 下 `C_i=sum(D)`）；仅用于复现旧 run（`--vq-channels-mode per_result`）。
 - **C = `local_steps * zo_directions`** = 本轮训练结果数（每条结果 1 channel；`--vq-channels` 仅诊断覆盖）。总 sketch = `C*c_dim`；相对“只发一条 dense delta”的总量 = `C*rate`（每条结果都上传，故总量是 C 倍）。
-- **VAR ON + VQ**：`C_i = sum(D)`（该 client 本轮实际结果数，逐 client 变化）；`c_dim=rate*d` 不变；每 client 单独构造 compressor；round metrics 记 `vq_channels_mean/min/max`，`dense_all_results_communication_bytes` 按 `sum C_i` 计；`vq_seeds.json` 用 `max_channels=128` 的前缀 seed。
+- **VAR ON + VQ**：per_client 模式下 channel 恒为 **1/client**（VAR 只影响 D/样本数，不影响 channel 数）；per_result 模式下 `C_i = sum(D)` 逐 client 变化、每 client 单独构造 compressor。round metrics 记 `vq_channels_mean/min/max/total` 与 `vq_channels_mode`；per_result 的 `dense_all_results_communication_bytes` 按 `sum C_i` 计。
 - **VAR ON + CATV**：votes 仍按每个 forward 累加；D 大的 sample 权重更大，组合实验只作系统评测，不是干净 CATV 消融。
 - **每个 channel 独立 hash/sign seed，所有 client 共享同一 seed 序列**（`--vq-seed` 默认 `--seed`）；`vq_seeds.json` 落盘。不要改成 C 个 channel 完全同 hash：那会退化成一个 `c_dim` sketch。
 - **clip 顺序：先按现有 `--delta-clip` 对完整 delta 做全局 L2 clip，再 VQ**；server 解压后默认 `--vq-rescale on` 缩放到 clip 后范数。当前实现用 C-channel sketch 压缩最终 delta，数学上等价于逐结果 sketch 后 server 求和；clip 仍在最终 delta 上（未做 per-result clip）。
 - **fidelity**：单条结果 `cos≈√(rate/(1+rate))`；C 条聚合后 `cos≈√(C*rate/(1+C*rate))`。C=64、rate 0.5 → 理论 0.985；`vq_cos_mean` 是**聚合后**口径，不能反推 per-result rate。rate=1 直接绕过 VQ，基线逐位不变。
 - **通信口径**：每条结果都上传时，dense baseline = `dense_all_results_communication_bytes = clients*C*d*2`；VQ = `vq_communication_bytes = clients*C*c_dim*bytes_per_element`。`vq_ratio_elements/bytes` 是**单条结果**口径；`vq_total_ratio_*` 是相对“一条 dense delta”的总量（= C × 单条）。默认 bf16 sketch（2B）下，rate 0.5 的单条/总量字节比都是 0.5（相对 per-result baseline），但总量是单条 dense delta 的 32×（C=64）。
-- metrics/config 字段：`vq_rate/vq_channels/vq_c_dim/vq_active_dim/vq_actual_rate/vq_total_ratio_elements/vq_sketch_dtype/vq_bytes_per_element/vq_cos_mean|min|max/vq_communication_bytes/dense_all_results_communication_bytes/vq_ratio_elements/vq_ratio_bytes/vq_total_ratio_bytes_vs_one_delta`；`config.json` 记录 `vq_seed/vq_sketch_dtype/vq_bytes_per_element`。
+- metrics/config 字段：`vq_rate/vq_channels/vq_channels_mean|min|max|total/vq_channels_mode/vq_c_dim/vq_active_dim/vq_actual_rate/vq_total_ratio_elements/vq_sketch_dtype/vq_bytes_per_element/vq_cos_mean|min|max/vq_communication_bytes/dense_all_results_communication_bytes/vq_ratio_elements/vq_ratio_bytes/vq_total_ratio_bytes_vs_one_delta`；`config.json` 记录 `vq_channels_mode/vq_channel_variability/vq_seed/vq_sketch_dtype/vq_bytes_per_element`。
 - 自检：`$PY src/compress/count_sketch.py`；smoke：
 
 ```bash
