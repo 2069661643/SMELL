@@ -180,3 +180,21 @@ cd <dest>/SMELLv3 && sha256sum \
 - 组合 off vs CATV-on 基线 off：30 轮 mean ΔNLL +0.003181、Δacc +0.0006；r29 +0.000506（p=0.735）⇒ VAR+VQ 权重与基线等价。
 - +0.0114 on-mask NLL 差来自 `client` 等权 mask：基线 `off` 归一化 r29 mask 收益 −0.0288，组合 `client` −0.0179，acc 多掉 0.6pt。
 - eval-off 产物：`checkpoints/distilbert_var_catv_vq_a03_r30_rerun/evaloff/`（30 × JSON + persample + SHA256SUMS）。
+
+## 10. BERT VQ **per-client** r30（a03，CATV off、VAR off；USE，261023）
+
+> 架构：`--vq-channels-mode per_client`（261023 起默认）——每 client 只对**最终 delta** 压 **1 条** sketch；`c_dim = rate*d_active` **不变**、`rate=0.5`、bf16、rescale on、seed 0；30 clients → **30 channel/轮**。
+> 配置：a03、CATV off、VAR off、L8/D8、lr=1.4e-3、clip=1.0、cycle、r30、eval 500。
+> 结果：r0 1.690728 / acc 0.424 → r29 **1.627351 / acc 0.448**（−3.75%）；同轮无 VQ a03 off = 1.588699 / 0.466 → 配对 ΔNLL **+0.038662**（t=7.75，p=9.55e-15，n=500）、acc −1.8pt。
+> VQ：`vq_channels=1`、`vq_channels_total=30`、`vq_cos_mean=0.7060`、`vq_ratio_bytes=0.5`、`vq_communication_bytes=1,105,920 B/round` vs `dense_all_results=2,211,840 B/round`（0.5× 最终 delta；比 per-result 少 64×）。
+> 训练 6.45h（773s/轮），与 VQ-off/per-result 相同。
+
+`checkpoints/distilbert_vq_perclient_a03_r30/`（adapter_round029 + metrics + config + vq_seeds + SHA256SUMS）：
+
+| 文件 | sha256 |
+|---|---|
+| `adapter_round029/adapter_model.safetensors` | `804606a66ad940157f27c7c6907071a6546a2753e28b89da6c2ae6b29967ef6d` |
+| `adapter_round029/adapter_config.json` | `ef8bd42fbaa09ee0eaa0688efa94cc194f9986436feb0f2d14d007d736fea1ab` |
+
+- 对照：per-result（1920 channel/轮、cos 0.9945）r29 1.587080/0.466、ΔNLL −0.0016；per-client 把通信降 64×，代价 **+0.0387 NLL / −1.8pt acc**。
+- 3-on（VAR+CATV(client)+VQ per_client）r30 重测：`logs/fed/bert_var_catv_vq_perclient_a03_r30/`（进行中，完成后补 §10.1）。
