@@ -198,3 +198,21 @@ cd <dest>/SMELLv3 && sha256sum \
 
 - 对照：per-result（1920 channel/轮、cos 0.9945）r29 1.587080/0.466、ΔNLL −0.0016；per-client 把通信降 64×，代价 **+0.0387 NLL / −1.8pt acc**。
 - 3-on（VAR+CATV(client)+VQ per_client）r30 重测：`logs/fed/bert_var_catv_vq_perclient_a03_r30/`（进行中，完成后补 §10.1）。
+
+### 10.1 BERT VAR+CATV+VQ **per-client** r30（a03；261024）
+
+> 配置：VAR Method A（T0=0.5872309208、r10/r20 探针）、CATV on（`client`）、VQ rate 0.5 bf16 **per-client**（1 channel/client，30 channel/轮，1.11 MB/轮）；L8、r30、eval 500。
+> 结果：r0 1.743194 / acc 0.410 → r29 **1.620426 / acc 0.450**（own −7.04%）。
+> 对照：3-on per-result 1.559838/0.450 → **ΔNLL +0.060588**（t=8.47，p<1e-16，n=500）、acc 0.0pt；CATV-on 基线 1.548441/0.454 → +0.071985（+4.65%）；CATV-off 基线 1.588699/0.466 → +0.031727（+2.00%，p=0.039）、acc −1.6pt。
+> VAR：mean D **9.858**、samples **78.87**（per-result 组合为 9.003 / 72.0）；T10=0.440958、T20=1.048238；hit_low 33/64、hit_high 14/64（r10 探针）。
+> VQ：channels=1、total=30、cos=0.7076、ratio_bytes=0.5、1,105,920 B/round（vs per-result 3-on 70.8MB）。
+> 训练 882s/轮（7.35h）。
+
+`checkpoints/distilbert_var_catv_vq_perclient_a03_r30/`（adapter_round029 + metrics + config + vq_seeds + var_thresholds + var_probe_round010/020 + SHA256SUMS）：
+
+| 文件 | sha256 |
+|---|---|
+| `adapter_round029/adapter_model.safetensors` | `af0776484af65e96cd601c4618c88e24eb9960dd40b8bcc15f3eb3eeb979efcc` |
+| `adapter_round029/adapter_config.json` | `054232a31ab36aee6003843b6701fef1cc0d75c33614f4675598d7ab17c5ef48` |
+
+- 口径 caveat：3-on per-client 的 VAR 轨迹被 VQ 噪声改变（D 9.86 vs 9.00、样本 78.9 vs 72.0），与 per-result 3-on 不是严格单变量对照；CATV 归一化同为 `client`。
