@@ -76,3 +76,12 @@
 | 10/24 08:44 | 完成 | 3-on per-client | r29 1.620426/.450；归档 |
 | 10/24 11:0x | 修改 | `AGENTS.md` / `docs/weight-manifest.md` | 组合 per-client 行 + §10.1 |
 | 10/24 11:0x | 新增 | 本 ailog | 两臂结果 + 差值分解 + 布局对照 |
+
+## 九、补充：3-on per-client 的 eval-off（261024 12:25）
+
+- r29：on **1.620426/.450** vs off **1.603422/.462** → mask **+0.017004**（更差）、acc −1.2pt；30 轮均值 mask ΔNLL **+0.037188**、Δacc **−0.0173**（mask 全程伤 NLL/acc）。
+- 与 3-on per-result 的 on-mask 差 **+0.060588** 分解：
+  - 权重（off vs off）：1.603422 − 1.577730 = **+0.025692**（42.4%）；
+  - mask 效应差：(+0.017004) − (−0.017892) = **+0.034896**（57.6%）。
+- 解读：per-client VQ 让 CATV mask 从“后段有益”变成“全程有害” —— VQ 噪声同时伤权重与 mask 选择。
+- 归档：`checkpoints/distilbert_var_catv_vq_perclient_a03_r30/evaloff/`（61 文件，含 SHA256SUMS）。

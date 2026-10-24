@@ -96,6 +96,9 @@ def parse_args():
                         help="sketch transmission dtype; accumulation is fp32, cast before decompress")
     parser.add_argument("--vq-bytes-per-element", type=int, default=0,
                         help="bytes per sketch element for accounting; 0 = auto (bf16=2, fp32=4)")
+    # SMELL 3 run_fed dump_deltas ADD — 诊断：把真实 per-client 更新方向（clip 后、VQ 前）落盘，供离线布局/rate 仿真
+    parser.add_argument("--dump-client-deltas", default="",
+                        help="dir to dump true per-client deltas (post-clip, pre-VQ) as deltas_roundNNN.pt; '' = off")
     # SMELL 3 run_fed rank_rotation ADD — LoRA 秩调度：all=旧行为；rotate=每轮激活 rank_k 个秩轮换；lock=固定前 rank_k 秩
     parser.add_argument("--rank-mode", choices=("all", "rotate", "lock"), default="all")
     parser.add_argument("--rank-k", type=int, default=1, help="每轮激活秩数（>0；rotate/lock 生效）")
@@ -1155,6 +1158,8 @@ def main():
         base_config.consensus_mask = consensus_mask
         base_config.vote_callback = None
         deltas, counts, losses, client_stats = [], [], [], {}
+        # SMELL 3 run_fed dump_deltas ADD — 本轮真实 delta 收集器（仅 --dump-client-deltas 时非空）
+        dump_rows = {}
         round_vote_sum = {}
         client_votes = {}
         for name in client_names:
@@ -1209,6 +1214,17 @@ def main():
                 client_delta = {key: value * scale for key, value in client_delta.items()}
                 delta_clipped = True
             # SMELL 3 run_fed delta_clip END
+            # SMELL 3 run_fed dump_deltas ADD — clip 后、VQ 前的真实方向（bf16 落盘，30 clients ≈ 2.2MB/轮）
+            if args.dump_client_deltas:
+                dump_rows[name] = {
+                    "delta": {k: v.detach().to("cpu", torch.bfloat16).clone()
+                              for k, v in client_delta.items()},
+                    "delta_norm": delta_norm(client_delta),
+                    "raw_norm": raw_norm,
+                    "clipped": delta_clipped,
+                    "samples": num_samples,
+                    "round_start": round_start,
+                }
             # SMELL 3 run_fed vq BEGIN — clip 后对 active 子空间做 Count Sketch，server 只解压不回传
             vq_cos = None
             vq_delta_norm = None
@@ -1295,6 +1311,24 @@ def main():
                 round_vote_sum = ServerAggregator.accumulate_votes(round_vote_sum, votes)
                 client_votes[name] = votes
 
+        # SMELL 3 run_fed dump_deltas ADD — 每轮一个文件（含 active_index / 采样元数据）
+        if args.dump_client_deltas:
+            dump_dir = Path(args.dump_client_deltas)
+            if not dump_dir.is_absolute():
+                dump_dir = REPO / dump_dir
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            dump_path = dump_dir / f"deltas_round{round_idx:03d}.pt"
+            torch.save({
+                "round": round_idx,
+                "tag": args.tag,
+                "active_index": active_index.detach().cpu(),
+                "local_steps": args.local_steps,
+                "zo_directions": args.zo_directions,
+                "delta_clip": args.delta_clip,
+                "clients": dump_rows,
+            }, dump_path)
+            print(f"[fed] dump deltas round {round_idx} -> {dump_path} "
+                  f"({len(dump_rows)} clients, active_dim={int(active_index.numel())})")
         aggregated = aggregator.aggregate(deltas, counts)
         global_state = {key: global_state[key] + aggregated[key] for key in global_state}
         load_trainable_state_dict(model, global_state)

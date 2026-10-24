@@ -232,3 +232,20 @@ cd <dest>/SMELLv3 && sha256sum \
 |---|---|
 | `adapter_round029/adapter_model.safetensors` | `8f9435fadec173ac3ef43c09a18c7a38885a572d3b7d424e90ec678540e8cd91` |
 | `adapter_round029/adapter_config.json` | `1ffbaab68918ce3032c514280520a4b55c864fb1fba0fdd1886b4a9febbc7bd0` |
+
+### 10.2 3-on per-client 的 eval-off（261024 12:25，30 个 adapter）
+
+> 协议同历史 eval-off：sdpa_prune / fp32 / sparse 0.4 / predictor / a03 global / 500 样本 / bs8，无 CATV mask。
+
+| 指标 | on-mask | off-mask | mask 效应 |
+|---|---|---|---|
+| r29 NLL / acc | 1.620426 / .450 | **1.603422 / .462** | **+0.017004**（mask 更差）、acc −1.2pt |
+| 30 轮均值 ΔNLL | — | — | **+0.037188**（mask 全程伤 NLL） |
+| 30 轮均值 Δacc | — | — | **−0.0173** |
+
+- 与 3-on per-result 的分解（on-mask 总差 +0.060588）：
+  - **权重差**（off vs off）：1.603422 vs 1.577730 = **+0.025692（+1.63%）** → 占 42.4%；
+  - **mask 效应差**：per-client +0.017004 vs per-result −0.017892 = **+0.034896** → 占 57.6%。
+- 即 per-client VQ 在组合系统里有双重代价：①权重更差；②**CATV mask 从“有效”变成“有害”**（per-result 的 mask 在 r25 后转正，per-client 全程为正）。
+- 其他对照（off-mask）：vs CATV-on 基线 off 1.577225 → +0.026197（+1.66%）；vs CATV-off 基线 1.588699/0.466 → +0.014723（+0.93%，acc −0.4pt）。
+- 产物：`checkpoints/distilbert_var_catv_vq_perclient_a03_r30/evaloff/`（30 JSON + 30 persample + SHA256SUMS，61 文件）。
