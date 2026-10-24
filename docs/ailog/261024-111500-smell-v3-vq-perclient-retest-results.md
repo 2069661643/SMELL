@@ -85,3 +85,17 @@
   - mask 效应差：(+0.017004) − (−0.017892) = **+0.034896**（57.6%）。
 - 解读：per-client VQ 让 CATV mask 从“后段有益”变成“全程有害” —— VQ 噪声同时伤权重与 mask 选择。
 - 归档：`checkpoints/distilbert_var_catv_vq_perclient_a03_r30/evaloff/`（61 文件，含 SHA256SUMS）。
+
+## 九、3-on per-client eval-off（10/24 12:25 完成）
+
+| r29 | NLL / acc |
+|---|---|
+| on-mask | 1.620426 / .450 |
+| **off-mask** | **1.603422 / .462** |
+| mask 效应 | **+0.017004（on 更差，p=0.27 n.s.）**、acc −1.2pt |
+
+- 30 轮均值：mask ΔNLL **+0.037188**、Δacc **−0.0173**（per-result 组合为 +0.0224 / −0.0161）。
+- **权重效应**（off vs off）：vs 3-on per-result 1.577730/.464 → **+0.025692**（t=3.18，p=0.0015）；vs CATV-on 基线 off 1.577225/.462 → +0.026198（p=0.0027）。
+- 归因 on-mask 总差 +0.060588：**权重 42.4% + mask 效应差 57.6%**（0.034896）；mask 项单轮 n.s.，论文以 30 轮均值叙述更稳。
+- 结论：per-client VQ 的噪声同时伤权重（+0.026，显著）与 vote/掩码质量（均值 mask 从 +0.022 恶化到 +0.037）。
+- 归档：`checkpoints/distilbert_var_catv_vq_perclient_a03_r30/evaloff/`（61 文件，含 SHA256SUMS）。

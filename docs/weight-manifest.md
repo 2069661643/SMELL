@@ -216,6 +216,10 @@ cd <dest>/SMELLv3 && sha256sum \
 | `adapter_round029/adapter_config.json` | `054232a31ab36aee6003843b6701fef1cc0d75c33614f4675598d7ab17c5ef48` |
 
 - 口径 caveat：3-on per-client 的 VAR 轨迹被 VQ 噪声改变（D 9.86 vs 9.00、样本 78.9 vs 72.0），与 per-result 3-on 不是严格单变量对照；CATV 归一化同为 `client`。
+> **eval-off（10/24 12:25，30 个 adapter）**：r29 on 1.620426/.450 vs off **1.603422/.462** → mask ΔNLL **+0.017004**（t=1.10，p=0.27 n.s.）、acc −1.2pt；30 轮均值 mask **+0.037188**、Δacc −0.0173。
+> 权重效应：vs 3-on per-result off 1.577730/.464 → **+0.025692**（t=3.18，**p=0.0015**）；vs CATV-on 基线 off 1.577225/.462 → +0.026198（p=0.0027）。
+> 归因（on-mask 总差 +0.060588）：权重 **+0.025692（42.4%）** + mask 效应差 **+0.034896（57.6%）**；单轮 mask 项 n.s.，以 30 轮均值（本 run +0.0372 vs per-result 组合 +0.0224）为准。
+> evaloff 归档：`checkpoints/distilbert_var_catv_vq_perclient_a03_r30/evaloff/`（30 JSON + 30 persample + SHA256SUMS）。
 
 ## 11. BERT FwdLLM 稠密（sparse=1.0）VAR r30（a03；USE，261023）
 
