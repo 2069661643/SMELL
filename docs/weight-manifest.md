@@ -216,3 +216,19 @@ cd <dest>/SMELLv3 && sha256sum \
 | `adapter_round029/adapter_config.json` | `054232a31ab36aee6003843b6701fef1cc0d75c33614f4675598d7ab17c5ef48` |
 
 - 口径 caveat：3-on per-client 的 VAR 轨迹被 VQ 噪声改变（D 9.86 vs 9.00、样本 78.9 vs 72.0），与 per-result 3-on 不是严格单变量对照；CATV 归一化同为 `client`。
+
+## 11. BERT FwdLLM 稠密（sparse=1.0）VAR r30（a03；USE，261023）
+
+> 配置：`--sparse 1.0`（sdpa_prune 走 dense fallback，全部块保留）、VAR Method A（T0=0.5872309208；T10=1.477083、T20=3.225293）、CATV off、VQ off、L8/D8、r30、eval 500、cycle、lr 1.4e-3、clip 1.0。
+> 结果：r0 **1.592325 / acc 0.454** → r29 **1.493650 / acc 0.472**（−6.20%）；**1346s/轮、11.39h**（sparse 0.4 的 1.59×）。
+> 对照：sparse 0.4 + VAR 1.584451/0.464 → dense **−0.090801 nats（−5.73%）、acc +0.8pt**；VQ-off sparse 基线 1.588699/0.466 → **−0.095048**。
+> VAR：mean D **9.108**、samples **72.87**；hit_low 32/64、hit_high 16/64（r10 探针）。
+> caveat：dense 的 r0 起点（1.5923）显著低于 sparse 0.4（1.6906），**跨稀疏度不可直接比终点绝对值**；应看 own% 或同协议基线。
+> 未测：dense 续训 r30–r59（原 B 计划，未启动）、dense+VQ、dense+CATV；eval-off 不适用（CATV off，评测本身无掩码）。
+
+`checkpoints/distilbert_fwdllm_a03_var_r30/`（adapter_round029 + metrics + config + var_thresholds + var_probe_round010/020 + SHA256SUMS）：
+
+| 文件 | sha256 |
+|---|---|
+| `adapter_round029/adapter_model.safetensors` | `8f9435fadec173ac3ef43c09a18c7a38885a572d3b7d424e90ec678540e8cd91` |
+| `adapter_round029/adapter_config.json` | `1ffbaab68918ce3032c514280520a4b55c864fb1fba0fdd1886b4a9febbc7bd0` |
