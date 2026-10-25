@@ -253,3 +253,29 @@ cd <dest>/SMELLv3 && sha256sum \
 - 即 per-client VQ 在组合系统里有双重代价：①权重更差；②**CATV mask 从“有效”变成“有害”**（per-result 的 mask 在 r25 后转正，per-client 全程为正）。
 - 其他对照（off-mask）：vs CATV-on 基线 off 1.577225 → +0.026197（+1.66%）；vs CATV-off 基线 1.588699/0.466 → +0.014723（+0.93%，acc −0.4pt）。
 - 产物：`checkpoints/distilbert_var_catv_vq_perclient_a03_r30/evaloff/`（30 JSON + 30 persample + SHA256SUMS，61 文件）。
+
+## 12. BERT r30 固定四臂**续训 r30→r59**（cycle；USE，261025）
+
+> 协议与首段完全一致：L8/D8、lr 1.4e-3、clip 1.0、cycle、eval 500、`--catv-normalize off`、`keep_block0=True`、LoRA r1/α2、fp32+sdpa_prune、sparse 0.4。
+> `--round-offset 30`（a01_off 接前次 partial：r52 → offset 53、7 轮）；CATV on 臂首轮掩码按设计重建（a01_on 在 r33 恢复、a03_on 在 r30 起）。
+> 每臂 ~6.45h；r30–r59 逐轮曲线见 `metrics.jsonl` 与 `temp/logs/bert_cont30_report.txt`。
+
+| 臂 | r0（首段） | r29（首段） | **r59** | r29→r59 | r0→r59 | acc r59 |
+|---|---|---|---|---|---|---|
+| r30_a01_catv_off | 1.6910/.424 | 1.5836/.468 | **1.5068/.484** | −4.85% | −10.89% | .484 |
+| r30_a01_catv_on | 1.7527/.408 | 1.5563/.458 | **1.4925/.482** | −4.10% | −14.85% | .482 |
+| r30_a03_catv_off | 1.6906/.426 | 1.5887/.466 | **1.5110/.474** | −4.89% | −10.62% | .474 |
+| r30_a03_catv_on | 1.7511/.410 | 1.5484/.454 | **1.4852/.472** | −4.08% | −15.18% | .472 |
+
+- 配对（n=500）：各臂 r29→r59 ΔNLL −0.063~−0.078，t=−6.8~−8.7，**p<1e-9**。
+- CATV on vs off @r59：a01 **−0.0143**（t=−1.22，p=0.222，n.s.）；a03 **−0.0258**（t=−2.25，p=0.0245）。
+  （@r29 为 a01 −0.0272/p=0.030、a03 −0.0403/p=0.0025 ⇒ CATV 优势随续训缩小，a03 仍显著。）
+
+`checkpoints/distilbert_ablation_r30_fixed_cont30/<arm>/`（adapter_round059 + metrics.jsonl + config.json + SHA256SUMS）：
+
+| 臂 | adapter_model sha256 |
+|---|---|
+| r30_a01_catv_off | `c93bbd4f330498a6719d4b8a280a7da91b6d696066b4829b2039bb15b13507a4` |
+| r30_a01_catv_on | `f816c24c64875866a99b94190f3f5c3b28181a006bbad6f6c5841cac3626dedf` |
+| r30_a03_catv_off | `b770dcfb65e2ae08d64769f161001faa14ad1765afcfded4fa958b71f3e7aedc` |
+| r30_a03_catv_on | `7ea56840ebcf0e5ef3dfa7da90f8e2ebb8395f6b4cb97ef85a1511aafa15885c` |
