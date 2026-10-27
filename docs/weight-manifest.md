@@ -285,3 +285,34 @@ cd <dest>/SMELLv3 && sha256sum \
 | r30_a01_catv_on | `f816c24c64875866a99b94190f3f5c3b28181a006bbad6f6c5841cac3626dedf` |
 | r30_a03_catv_off | `b770dcfb65e2ae08d64769f161001faa14ad1765afcfded4fa958b71f3e7aedc` |
 | r30_a03_catv_on | `7ea56840ebcf0e5ef3dfa7da90f8e2ebb8395f6b4cb97ef85a1511aafa15885c` |
+
+## 13. BERT 第三段续训 r60→r89（lr=1.4e-3/3；USE，261027）
+
+> 协议：与 cont30 相同（L8/D8、clip 1.0、cycle、eval 500、`catv-normalize off`、keep_block0、fp32+sdpa_prune、sparse 0.4），
+> 唯一变化 **lr = 4.6666667e-4 = 1.4e-3/3**（与 OPT 续训 `run_r60_cont_bg.sh` 的 lr 1/3 口径一致）；`--round-offset 60 --rounds 30`。
+> 起点：`checkpoints/distilbert_ablation_r30_fixed_cont30/<arm>/adapter_round059`。
+
+| 臂 | r59 | r60 | **r89** | r59→r89 | acc r59→r89 | seg3_h | %/h |
+|---|---|---|---|---|---:|---:|---:|
+| r30_a01_catv_off | 1.5068/.484 | 1.5047 | **1.4703/.502** | **−2.42%** | +1.8pt | 6.47 | 0.35 |
+| r30_a01_catv_on | 1.4925/.482 | 1.4871 | **1.4659/.490** | **−1.78%** | +0.8pt | 6.45 | 0.22 |
+| r30_a03_catv_off | 1.5110/.474 | 1.5097 | **1.4724/.490** | **−2.55%** | +1.6pt | 6.44 | 0.38 |
+| r30_a03_catv_on | 1.4852/.472 | 1.4855 | **1.4610/.488** | **−1.63%** | +1.6pt | 6.49 | 0.26 |
+
+- 配对（n=500）：r59→r89 ΔNLL −0.0242~−0.0386，t=−4.5~−7.8，**p<1e-5**。
+- **CATV on vs off @r89**：a01 **−0.0044**（t=−0.42，p=0.675）；a03 **−0.0114**（t=−1.08，p=0.281）⇒ **均不显著**。
+  （趋势：@r29 −0.027/−0.040 → @r59 −0.014/−0.026 → @r89 −0.004/−0.011）
+- ACC 明显继续提升（+0.8~+1.8pt），lr 降到 1/3 后 NLL 增益速率降至 0.22–0.38 %/h（前两段 0.6–0.7 %/h）。
+- r0→r89 总降幅：a01_off 13.05%、a01_on 16.36%、a03_off 12.91%、a03_on 16.57%。
+
+`checkpoints/distilbert_ablation_r30_fixed_cont60/<arm>/`（adapter_round089 + metrics.jsonl + config.json + SHA256SUMS）：
+
+| 臂 | adapter_model sha256 |
+|---|---|
+| r30_a01_catv_off | `0a72f7a7dda899426e01880ca174ff41286768795b205a61189dcf502d60158b` |
+| r30_a01_catv_on | `a55ad70015eccc9b05390d72f3e88f54dc9367515c0243fdf5bdc36ab0d02971` |
+| r30_a03_catv_off | `1d63a7b91d6934f2fed2ea9fab54f94fd76636f5a99c65056a7e846b6c1b4d48` |
+| r30_a03_catv_on | `d1763a95af8f132144bb1aa38f0daf81f4a881b1c17859fc7d734adcdb7a34b2` |
+
+- 事故与恢复：首跑 out-root 误用（4 臂共享 a01/a03）导致 a01_off 权重被覆盖、a03_off r60–64 被覆盖；
+  a01_off/a03_on 已用同起点同 seed 重跑，**逐位复现**（13 轮 max|ΔNLL|=0）；a03_off r60–64 用 5 轮确定性重跑恢复，eval 校验 **MATCH**。详见 `261026-130000`。
