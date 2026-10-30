@@ -316,3 +316,28 @@ cd <dest>/SMELLv3 && sha256sum \
 
 - 事故与恢复：首跑 out-root 误用（4 臂共享 a01/a03）导致 a01_off 权重被覆盖、a03_off r60–64 被覆盖；
   a01_off/a03_on 已用同起点同 seed 重跑，**逐位复现**（13 轮 max|ΔNLL|=0）；a03_off r60–64 用 5 轮确定性重跑恢复，eval 校验 **MATCH**。详见 `261026-130000`。
+
+## 14. BERT 技术线第三段续训 r60→r89（lr=1.4e-3/3；USE，261030）
+
+> 三条技术线从各自 cont30 的 `adapter_round059` 续 30 轮（`--round-offset 60`），lr=**4.6667e-4**（与 4 臂 cont60 同口径）；
+> VAR 阈值续段末（dense 11.3807、3-on 6.5822），r60/r70/r80 探针重标定；CATV mask 在 r60 重置。
+
+| 线 | r59 | r60 | **r89** | r59→r89 | acc r89 | 配对 r59→r89 | 时长 |
+|---|---|---:|---:|---:|---:|---|---:|
+| dense VAR（sparse=1.0） | 1.3437 | 1.3417 | **1.3096** | +2.53% | .520 | −0.0341（t=−4.38，p=1.2e-5） | 10.83h |
+| 3-on（VAR+CATV client+VQ pr） | 1.4896 | 1.4921 | **1.4598** | +2.00% | .480 | −0.0299（t=−6.19，p=6.1e-10） | 7.17h |
+| VQ 0.5 per-result | 1.5139 | 1.5130 | **1.4780** | +2.37% | .494 | −0.0359（t=−7.55，p=4.4e-14） | 6.43h |
+
+- r89 技术统计：dense VAR `D=8.08 / samples=64.7`（目标 64）、阈值 T60/T70/T80 = 13.756/15.094/18.581；
+  3-on `D=9.37 / samples=74.9`、`cos=0.9952`、VQ 82.87 MB/轮、阈值 8.167/5.321/5.194；VQ pr `C=64、cos=0.9945、70.78 MB/轮`。
+- 与 4 臂 r89 横向：dense VAR 1.3096/.520（最强，dense 非 Jenga）；3-on 1.4598/.480 ≈ a03_on 1.4610/.488（NLL −0.0012、acc −0.8pt）；
+  VQ pr 1.4780/.494 vs a03_off 1.4724/.490（+0.0056/+0.38%，acc +0.4pt）。
+- 归档（adapter_round089 + metrics + config + var_thresholds + probes + SHA256SUMS）：
+
+| 归档 | adapter_model sha256 |
+|---|---|
+| `checkpoints/distilbert_fwdllm_a03_var_cont60/` | `ef77447f0abe2c5151e93046dbeb6117c55e63b61acfa5eb8e7544beff63dce6` |
+| `checkpoints/distilbert_var_catv_vq_a03_cont60/` | `831cb7f0b2757187586a1d31fc6a1a647525397e2da4f77dccdb7590836914bf` |
+| `checkpoints/distilbert_vq050_perresult_a03_cont60/` | `362e473a23910273da5a732c6bba6541119985e68da584e86cb45417f6594879` |
+
+- provenance caveat：续训段（offset>0）不会写 `vq_seeds.json`（代码只在 round 0 写）；VQ seed 恒为默认 0、`c_dim=18432`，可离线重建。
