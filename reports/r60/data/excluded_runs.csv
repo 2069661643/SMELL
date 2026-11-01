@@ -1,0 +1,9 @@
+run_id,reason
+distilbert_ablation_r30_fixed,first segment r0-r29 (superseded; used only as r59 lineage)
+distilbert_ablation_r30_fixed_cont30,previous segment r30-r59 (r59 reference only)
+distilbert_vq_perclient_a03_r30,"VQ per-client semantics; r30 only, not part of r60"
+distilbert_var_catv_vq_perclient_a03_r30,"combo per-client; r30 only, not part of r60"
+distilbert_vq025_a03_r20_partial,old total-rate VQ partial
+distilbert_vq050_bf16_a03_r0_partial,old total-rate VQ partial
+distilbert_var_catv_vq_a03_r6_partial,killed combo partial
+distilbert_var_a03_r30,pool-level VAR diagnostic

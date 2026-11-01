@@ -1,0 +1,2 @@
+run_id,nll_r0,nll_r29,acc_r0,acc_r29,mean_D,adapter_sha256,source_dir,note
+var_methoda_a03,1.690642,1.584451,0.426000,0.464000,8.790556,3a84cd1e3be5a9993a1d91eb03cb13c380f7ff95e80921810d815c41ccf28f74,logs/fed/bert_var_methoda_a03_r30/a03,no r60 continuation exists; endpoint is r29 (r30 archive)

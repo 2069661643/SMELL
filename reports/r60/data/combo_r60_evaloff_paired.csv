@@ -1,0 +1,5 @@
+comparison,tag,a_run,b_run,field,n,mean_delta_nll,sd,se,t,p_two_sided,p_normal_approx,ci95_low,ci95_high,verdict
+mask_effect_r59,a03,3-on (VAR+CATV+VQ pr),3-on (VAR+CATV+VQ pr),nll,500,-0.033507,0.311660,0.013938,-2.404006,0.016216,0.016216,-0.060825,-0.006189,IMPROVED
+mask_effect_r89,a03,3-on (VAR+CATV+VQ pr),3-on (VAR+CATV+VQ pr),nll,500,-0.038081,0.330120,0.014763,-2.579416,0.009897,0.009897,-0.067017,-0.009145,IMPROVED
+weight_effect_r59_r89_off,a03,3-on (VAR+CATV+VQ pr),3-on (VAR+CATV+VQ pr),nll,500,-0.025282,0.089755,0.004014,-6.298453,0.000000,0.000000,-0.033149,-0.017414,IMPROVED
+total_r59_r89_on,a03,3-on (VAR+CATV+VQ pr),3-on (VAR+CATV+VQ pr),nll,500,-0.029856,0.107878,0.004824,-6.188448,0.000000,0.000000,-0.039312,-0.020400,IMPROVED

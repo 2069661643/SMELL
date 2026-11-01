@@ -1,0 +1,9 @@
+comparison,tag,a_run,b_run,field,n,mean_delta_nll,sd,se,t,p_two_sided,p_normal_approx,ci95_low,ci95_high,verdict
+mask_effect_r59,a01,r30_a01_catv_on,r30_a01_catv_on,nll,500,-0.038582,0.350006,0.015653,-2.464849,0.013707,0.013707,-0.069261,-0.007902,IMPROVED
+mask_effect_r89,a01,r30_a01_catv_on,r30_a01_catv_on,nll,500,-0.036726,0.342866,0.015333,-2.395166,0.016613,0.016613,-0.066780,-0.006673,IMPROVED
+weight_effect_r59_r89_off,a01,r30_a01_catv_on,r30_a01_catv_on,nll,500,-0.028424,0.097279,0.004350,-6.533581,0.000000,0.000000,-0.036951,-0.019897,IMPROVED
+total_r59_r89_on,a01,r30_a01_catv_on,r30_a01_catv_on,nll,500,-0.026568,0.131040,0.005860,-4.533609,0.000006,0.000006,-0.038054,-0.015082,IMPROVED
+mask_effect_r59,a03,r30_a03_catv_on,r30_a03_catv_on,nll,500,-0.047220,0.344078,0.015388,-3.068672,0.002150,0.002150,-0.077379,-0.017060,IMPROVED
+mask_effect_r89,a03,r30_a03_catv_on,r30_a03_catv_on,nll,500,-0.040513,0.322770,0.014435,-2.806636,0.005006,0.005006,-0.068805,-0.012221,IMPROVED
+weight_effect_r59_r89_off,a03,r30_a03_catv_on,r30_a03_catv_on,nll,500,-0.030927,0.103694,0.004637,-6.669078,0.000000,0.000000,-0.040016,-0.021837,IMPROVED
+total_r59_r89_on,a03,r30_a03_catv_on,r30_a03_catv_on,nll,500,-0.024220,0.099413,0.004446,-5.447754,0.000000,0.000000,-0.032934,-0.015506,IMPROVED

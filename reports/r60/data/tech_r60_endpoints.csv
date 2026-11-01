@@ -1,0 +1,4 @@
+line,note,nll_r59,nll_r60,nll_r89,delta_nll_seg_pct,delta_nll_r59_r89_pct,acc_r59,acc_r89,var_D_mean_r89,vq_cos_mean_r89,train_hours,nll_pct_per_hour,adapter_sha256,source_dir
+dense VAR (sparse=1.0),sparse 1.0 + VAR Method A,1.343676,1.341689,1.309619,2.390245,2.534630,0.520000,0.520000,8.083333,,10.832618,0.233981,ef77447f0abe2c5151e93046dbeb6117c55e63b61acfa5eb8e7544beff63dce6,logs/fed/bert_fwdllm_a03_var_cont60/a03
+3-on (VAR+CATV+VQ pr),VAR+CATV(client)+VQ 0.5 per-result,1.489628,1.492122,1.459772,2.168016,2.004255,0.478000,0.480000,9.366667,0.995180,7.165990,0.279690,831cb7f0b2757187586a1d31fc6a1a647525397e2da4f77dccdb7590836914bf,logs/fed/bert_var_catv_vq_a03_cont60/a03
+VQ 0.5 per-result,VQ 0.5 bf16 per-result,1.513889,1.512978,1.478011,2.311165,2.369972,0.474000,0.494000,,0.994537,6.427908,0.368700,362e473a23910273da5a732c6bba6541119985e68da584e86cb45417f6594879,logs/fed/bert_vq050_perresult_a03_cont60/a03

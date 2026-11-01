@@ -1,0 +1,9 @@
+run_id,path,status,note
+r30_a01_catv_off,logs/fed/bert_da_fixed_cont60/r30_a01_catv_off/a01,USE,r60-r89 lr=4.6667e-4 catv=off catv_normalize=off
+r30_a01_catv_on,logs/fed/bert_da_fixed_cont60/r30_a01_catv_on/a01,USE,r60-r89 lr=4.6667e-4 catv=on catv_normalize=off
+r30_a03_catv_off,logs/fed/bert_da_fixed_cont60/r30_a03_catv_off/a03,USE,r60-r89 lr=4.6667e-4 catv=off catv_normalize=off
+r30_a03_catv_on,logs/fed/bert_da_fixed_cont60/r30_a03_catv_on/a03,USE,r60-r89 lr=4.6667e-4 catv=on catv_normalize=off
+dense VAR (sparse=1.0),logs/fed/bert_fwdllm_a03_var_cont60/a03,USE,r60-r89 lr=4.6667e-4; sparse 1.0 + VAR Method A
+3-on (VAR+CATV+VQ pr),logs/fed/bert_var_catv_vq_a03_cont60/a03,USE,r60-r89 lr=4.6667e-4; VAR+CATV(client)+VQ 0.5 per-result
+VQ 0.5 per-result,logs/fed/bert_vq050_perresult_a03_cont60/a03,USE,r60-r89 lr=4.6667e-4; VQ 0.5 bf16 per-result
+var_methoda_a03,logs/fed/bert_var_methoda_a03_r30/a03,USE (r29 endpoint),VAR only; no r60 continuation

@@ -1,0 +1,3 @@
+line,round,on_nll,on_acc,off_nll,off_acc,mask_dNLL,mask_dAcc
+3-on (VAR+CATV+VQ pr),59,1.489628,0.478000,1.523135,0.470000,-0.033507,0.008000
+3-on (VAR+CATV+VQ pr),89,1.459772,0.480000,1.497853,0.474000,-0.038081,0.006000

@@ -1,0 +1,7 @@
+comparison,tag,a_run,b_run,field,n,mean_delta_nll,sd,se,t,p_two_sided,p_normal_approx,ci95_low,ci95_high,verdict
+r59_to_r89,a03,dense VAR (sparse=1.0),dense VAR (sparse=1.0),nll,500,-0.034057,0.173901,0.007777,-4.379175,0.000012,0.000012,-0.049300,-0.018814,IMPROVED
+r59_to_r89,a03,3-on (VAR+CATV+VQ pr),3-on (VAR+CATV+VQ pr),nll,500,-0.029856,0.107878,0.004824,-6.188448,0.000000,0.000000,-0.039312,-0.020400,IMPROVED
+r59_to_r89,a03,VQ 0.5 per-result,VQ 0.5 per-result,nll,500,-0.035879,0.106264,0.004752,-7.549807,0.000000,0.000000,-0.045193,-0.026564,IMPROVED
+r89_dense VAR (sparse=1.0)_vs_3-on (VAR+CATV+VQ pr),a03,dense VAR (sparse=1.0),3-on (VAR+CATV+VQ pr),nll,500,0.150153,0.429188,0.019194,7.822977,0.000000,0.000000,0.112533,0.187773,WORSENED
+r89_dense VAR (sparse=1.0)_vs_VQ 0.5 per-result,a03,dense VAR (sparse=1.0),VQ 0.5 per-result,nll,500,0.168391,0.450556,0.020149,8.357111,0.000000,0.000000,0.128898,0.207884,WORSENED
+r89_3-on (VAR+CATV+VQ pr)_vs_VQ 0.5 per-result,a03,3-on (VAR+CATV+VQ pr),VQ 0.5 per-result,nll,500,0.018238,0.251281,0.011238,1.622965,0.104597,0.104597,-0.003787,0.040264,WORSENED
