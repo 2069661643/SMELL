@@ -141,6 +141,11 @@ def run_combo(combo, args):
 
     record = dict(combo)
     record.update({
+        # SMELL 3 bench_provenance ADD — 记录模型/精度/LoRA 秩，避免交付包无法核对
+        "model_dir": str(args.model_dir),
+        "dtype": "bf16",
+        "lora_r": 8,
+        "device_name": torch.cuda.get_device_name(0),
         "status": "ok",
         "mode": args.mode,
         "seq_len": args.seq_len,

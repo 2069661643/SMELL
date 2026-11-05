@@ -15,6 +15,12 @@ OUT = REPO / "reports" / "mem"
 DATA = OUT / "data"
 
 SEQ_LABELS = {1024: "1k", 2048: "2k", 4096: "4k", 8192: "8k", 16384: "16k"}
+BENCH_DEFAULTS = {
+    "model_dir": "third_party/Jenga/checkpoints/opt-350m",
+    "dtype": "bf16",
+    "lora_r": 8,
+    "device_name": "NVIDIA GeForce RTX 4090",
+}
 KINDS = ("dense", "sparse")
 MODES = ("zoo", "backward", "forward")
 
@@ -38,10 +44,19 @@ def collect():
                     rows.append({"mode": mode, "seq_len": seq, "seq_label": SEQ_LABELS[seq],
                                  "kind": kind, "peak_gib": None, "elapsed_s": None,
                                  "status": "missing", "zoo_directions": None, "zo_eps": None,
+                                 "model_dir": BENCH_DEFAULTS["model_dir"], "dtype": BENCH_DEFAULTS["dtype"],
+                                 "lora_r": BENCH_DEFAULTS["lora_r"], "device_name": BENCH_DEFAULTS["device_name"],
+                                 "meta_source": "bench_default",
                                  "source_file": str(path.relative_to(REPO)),
                                  "mtime": None})
                     continue
                 record = load_record(path)
+                has_meta = bool(record.get("model_dir"))
+                model_dir = record.get("model_dir") or BENCH_DEFAULTS["model_dir"]
+                model_dir = str(model_dir)
+                prefix = str(REPO) + "/"
+                if model_dir.startswith(prefix):
+                    model_dir = model_dir[len(prefix):]
                 rows.append({
                     "mode": mode, "seq_len": seq, "seq_label": SEQ_LABELS[seq], "kind": kind,
                     "peak_gib": record.get("peak_allocated_gb"),
@@ -49,6 +64,11 @@ def collect():
                     "status": record.get("status"),
                     "zoo_directions": record.get("zoo_directions"),
                     "zo_eps": record.get("zo_eps"),
+                    "model_dir": model_dir,
+                    "dtype": record.get("dtype") or BENCH_DEFAULTS["dtype"],
+                    "lora_r": record.get("lora_r") or BENCH_DEFAULTS["lora_r"],
+                    "device_name": record.get("device_name") or BENCH_DEFAULTS["device_name"],
+                    "meta_source": "json" if has_meta else "bench_default",
                     "source_file": str(path.relative_to(REPO)),
                     "mtime": os.path.getmtime(path),
                 })
@@ -134,7 +154,8 @@ def write_readme(summary, rows):
     lines.append("")
     lines.append("## 范围与来源")
     lines.append("")
-    lines.append("- 模型：OPT-350M（`third_party/Jenga/checkpoints/opt-350m`），bf16 权重 + autocast，flash/SDPA；")
+    lines.append("- 模型：**OPT-350M**（`third_party/Jenga/checkpoints/opt-350m`；24L / hidden 1024 / 16 heads / vocab 50272，"
+                 "max_pos 2048 由 `ensure_positions` 扩到 16k），bf16 权重 + autocast，flash/SDPA；")
     lines.append("- LoRA：qkvo，r=8（bench 默认，**不是**主线的 r=1）；单卡 RTX 4090 24GB，`cap_fraction=0.9`；")
     lines.append("- 输入：单条随机 `input_ids`，长度 1024/2048/4096/8192/16384，单步；指标为 `torch.cuda.max_memory_allocated()`（peak_allocated，非 reserved）。")
     lines.append("")
@@ -171,6 +192,8 @@ def write_readme(summary, rows):
     lines.append("- bench 口径（bf16/flash/LoRA r8）≠ 主线（fp32 + LoRA r1）；横向对比（ZOO vs BP、dense vs sparse）有效，绝对值不可直接当主线显存。")
     lines.append("- `peak_allocated` 是 PyTorch 分配器口径（非 reserved，也不含 CUDA context）；不同驱动/框架版本会有 ±0.1 GiB 级差异。")
     lines.append("- ZOO 的 D 只影响耗时（每次方向 2 次前向），不影响峰值；本表 D=8。")
+    lines.append("- 模型 provenance：ZOO 10 组 JSON 自带 `model_dir/dtype/lora_r/device_name`（`meta_source=json`）；"
+                 "BP 10 组为同一 bench 默认值，脚本按默认补记（`meta_source=bench_default`），两者同脚本同口径。")
     lines.append("- 早期 `mem_sweep` 的 “forward” 模式是建图前向（≈BP−0.2 GiB），只以 `mem_tidy.csv` 的 `mode=forward` 行保留作口径对照，**不应**用于 ZOO 结论。")
     lines.append("")
     lines.append("## 文件索引")
@@ -216,14 +239,16 @@ def main():
 
     write_csv(DATA / "mem_tidy.csv",
               ["mode", "seq_len", "seq_label", "kind", "peak_gib", "elapsed_s", "status",
-               "zoo_directions", "zo_eps", "source_file"], rows)
+               "zoo_directions", "zo_eps", "model_dir", "dtype", "lora_r", "device_name",
+               "meta_source", "source_file"], rows)
     write_csv(DATA / "mem_summary.csv",
               ["seq_len", "seq_label", "zoo_dense_gib", "zoo_sparse_gib", "zoo_save_pct",
                "bp_dense_gib", "bp_sparse_gib", "bp_save_pct", "bp_over_zoo_dense",
                "bp_over_zoo_sparse", "zoo_dense_s", "zoo_sparse_s", "bp_dense_s", "bp_sparse_s"],
               summary)
     write_csv(DATA / "provenance.csv",
-              ["mode", "seq_len", "kind", "source_file", "mtime", "status", "peak_gib"], rows)
+              ["mode", "seq_len", "kind", "source_file", "mtime", "status", "peak_gib",
+               "model_dir", "dtype", "lora_r", "meta_source"], rows)
     write_readme(summary, rows)
     ok = sum(1 for row in rows if row["peak_gib"] is not None)
     print(f"[mem_report] wrote {OUT/'README.md'} + 3 CSV; ok rows={ok}/30")
