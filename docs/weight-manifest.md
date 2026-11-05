@@ -341,3 +341,37 @@ cd <dest>/SMELLv3 && sha256sum \
 | `checkpoints/distilbert_vq050_perresult_a03_cont60/` | `362e473a23910273da5a732c6bba6541119985e68da584e86cb45417f6594879` |
 
 - provenance caveat：续训段（offset>0）不会写 `vq_seeds.json`（代码只在 round 0 写）；VQ seed 恒为默认 0、`c_dim=18432`，可离线重建。
+
+## 15. OPT fixed 四臂续训 r30→r59（lr=0.30；USE，261105）
+
+> 起点：`checkpoints/opt_ablation_r30_fixed/<arm>/adapter_round029`；`--round-offset 30 --rounds 30`；其余同 r30 fixed
+> （k24/sdpa_prune/fp32/sparse0.4/L2/D32/rotate24/clip13.34/cycle/eval every 5/catv-normalize off）。
+
+| 臂 | r29 full/answer | r59 full/answer | full Δ | answer Δ | adapter sha256 |
+|---|---|---|---:|---:|---|
+| r30_a01_catv_off | 31.5334 / 2436.1 | **30.9529 / 2174.8** | −1.84% | −10.73% | `9570d21ae4658a9b3252e421a71bc692b9b7f731b2267fa321ab84eaafe09c12` |
+| r30_a01_catv_on | 31.6351 / 2474.4 | **31.1256 / 2277.1** | −1.61% | −7.98% | `33f444e367d3ef64ab937cc4726e84ea99661e0655b4ca1170c64777e1ef28d1` |
+| r30_a03_catv_off | 31.4568 / 2448.8 | **30.8639 / 2362.6** | −1.88% | −3.52% | `99ce218eedf2da5f01002dd5f3f0c406c1491e772b382a8f498c0f285a78421b` |
+| r30_a03_catv_on | 31.6957 / 2291.7 | **30.9586 / 1504.2** | −2.33% | **−34.37%** | `639d3f2bb935a8e37f99b7a3ef939bdf6ef389daee7fad3f1f0917192182735a` |
+
+- 配对 r29→r59（n=500）：full −0.0162~−0.0235（p<1e-16）；answer a01 −0.102/−0.112（p≤8e-6）、a03_off −0.025（p=0.30 n.s.）、a03_on **−0.419**（p<1e-16）。
+- CATV on-vs-off @r59：a01 full +0.0056 / answer +0.0166（n.s.）；a03 full +0.0031（量级<0.01%）/ answer **−0.4873**（p<1e-16）。
+- **eval-off 分解**（r59，dNLL = on−off）：a03 mask full +0.0072（更差）/ answer −0.0528（更好），权重 full −0.0042 / answer −0.4345（更好）⇒ answer 收益 89% 权重；
+  a01 mask answer −0.1641（更好）但权重 +0.1807（更差）→ 净 +0.0166 n.s.。
+- on 臂归档含 `evaloff_round034..059{,_persample}.json`（各 12 文件）；报告 `temp/logs/opt_cont30_report.txt`、`opt_cont30_evaloff_report.txt`。
+- 事故：首版 out-root 冲突（a01_off 权重被 a01_on 覆盖）；重跑 a01_off 逐位复现（r34/r39 完全一致）后补齐归档；原始目录留档 `logs/fed/opt_r30_fixed_cont30/a01_collided_off+on/`。
+
+### 15.1 显存矩阵（1k–16k，dense vs sparse 0.4；261105）
+
+`src/bench/memory.py`（OPT-350M、bf16 + flash、LoRA qkvo r=8、单步、cap 0.9、peak_allocated）：
+
+| seq | fwd dense | fwd sparse | 省 | bwd dense | bwd sparse | 省 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1k | 1.90 | 1.78 | 6.2% | 2.00 | 1.88 | 5.9% |
+| 2k | 3.08 | 2.87 | 7.0% | 3.28 | 3.07 | 6.5% |
+| 4k | 4.68 | 4.24 | 9.4% | 4.89 | 4.45 | 9.0% |
+| 8k | 7.89 | 6.98 | 11.5% | 8.10 | 7.19 | 11.2% |
+| 16k | **14.30** | **12.48** | **12.7%** | **14.51** | **12.69** | **12.5%** |
+
+- 产物 `temp/mem_sweep/summary.md`、`summary.csv`、`mem_<mode>_<kind>_<seq>.json`。
+- caveat：bench 口径（bf16/flash/r8）≠ 主线（fp32/r1）；`peak_allocated` 非 reserved。
