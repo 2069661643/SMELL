@@ -361,17 +361,24 @@ cd <dest>/SMELLv3 && sha256sum \
 - on 臂归档含 `evaloff_round034..059{,_persample}.json`（各 12 文件）；报告 `temp/logs/opt_cont30_report.txt`、`opt_cont30_evaloff_report.txt`。
 - 事故：首版 out-root 冲突（a01_off 权重被 a01_on 覆盖）；重跑 a01_off 逐位复现（r34/r39 完全一致）后补齐归档；原始目录留档 `logs/fed/opt_r30_fixed_cont30/a01_collided_off+on/`。
 
-### 15.1 显存矩阵（1k–16k，dense vs sparse 0.4；261105）
+### 15.1 显存矩阵：ZOO vs BP（1k–16k，dense vs sparse 0.4；261105）
 
 `src/bench/memory.py`（OPT-350M、bf16 + flash、LoRA qkvo r=8、单步、cap 0.9、peak_allocated）：
+- **ZOO** = `src/train/zoo.py` 的 `zo_grad`（真实实现；每次 forward 在 `torch.no_grad()` 下，D=8、eps=1e-3）；
+- **BP** = training-mode forward + `loss.backward()`。
 
-| seq | fwd dense | fwd sparse | 省 | bwd dense | bwd sparse | 省 |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1k | 1.90 | 1.78 | 6.2% | 2.00 | 1.88 | 5.9% |
-| 2k | 3.08 | 2.87 | 7.0% | 3.28 | 3.07 | 6.5% |
-| 4k | 4.68 | 4.24 | 9.4% | 4.89 | 4.45 | 9.0% |
-| 8k | 7.89 | 6.98 | 11.5% | 8.10 | 7.19 | 11.2% |
-| 16k | **14.30** | **12.48** | **12.7%** | **14.51** | **12.69** | **12.5%** |
+| seq | ZOO dense | ZOO sparse | ZOO 省 | BP dense | BP sparse | BP 省 | BP/ZOO（dense） |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1k | 1.02 | 0.99 | 2.9% | 2.00 | 1.88 | 5.9% | 1.96× |
+| 2k | 1.31 | 1.26 | 3.7% | 3.28 | 3.07 | 6.5% | 2.50× |
+| 4k | 1.50 | 1.39 | 7.4% | 4.89 | 4.45 | 9.0% | 3.25× |
+| 8k | 1.89 | 1.66 | 11.9% | 8.10 | 7.19 | 11.2% | 4.28× |
+| **16k** | **2.66** | **2.21** | **16.9%** | **14.51** | **12.69** | **12.5%** | **5.45×** |
 
-- 产物 `temp/mem_sweep/summary.md`、`summary.csv`、`mem_<mode>_<kind>_<seq>.json`。
-- caveat：bench 口径（bf16/flash/r8）≠ 主线（fp32/r1）；`peak_allocated` 非 reserved。
+- **ZOO 比 BP 省 2.0×（1k）→ 5.5×（16k）**；斜率：ZOO ~0.1 GiB/1k、BP ~0.9 GiB/1k（16k 段）。
+- 稀疏的**相对**节省 ZOO 更大（16.9% vs 12.5%），**绝对**节省 BP 更大（1.82 vs 0.45 GiB）——BP 的图里也保存了被剪枝块的激活。
+- ZOO 16k 仅 2.2–2.7 GiB（8GB 卡可跑）；BP 16k 需 12.7–14.5 GiB。
+- 时间：ZOO 16k 8 方向 5.6s（16 次 no_grad 前向 ≈0.35s/次）；BP 单步 ~2.0s。
+- 早期的 "forward" 列（1.90→14.30 GiB）是 **training-mode 前向（建图）**，≈BP−0.2 GiB，**不是** ZOO 路径，勿混用。
+- 产物：`temp/mem_sweep_zoo/summary.md`（ZOO）、`temp/mem_sweep/summary.md`（BP/graph-fwd）。
+- caveat：bench 口径（bf16/flash/r8）≠ 主线（fp32/r1）；`peak_allocated` 非 reserved；D 只影响时间不影响峰值。

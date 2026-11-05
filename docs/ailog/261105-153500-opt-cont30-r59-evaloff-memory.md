@@ -95,3 +95,21 @@ CATV on-vs-off @r59：
 | 11/5 00:47 | 完成 | 显存矩阵（20 组） | `temp/mem_sweep/summary.md` |
 | 11/5 15:3x | 修改 | `AGENTS.md` / `docs/weight-manifest.md` | cont30 行 + §15 |
 | 11/5 15:3x | 新增 | 本 ailog | — |
+
+## 八、显存口径修正（261105 15:4x）：ZOO vs BP
+
+用户指出 "BP v.s. 我们实现的 zoo"，重测 ZOO 路径（仅 ZOO，BP 用既有数据）：
+
+| seq | ZOO dense | ZOO sparse | ZOO 省 | BP dense | BP sparse | BP 省 | BP/ZOO |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1k | 1.02 | 0.99 | 2.9% | 2.00 | 1.88 | 5.9% | 1.96× |
+| 2k | 1.31 | 1.26 | 3.7% | 3.28 | 3.07 | 6.5% | 2.50× |
+| 4k | 1.50 | 1.39 | 7.4% | 4.89 | 4.45 | 9.0% | 3.25× |
+| 8k | 1.89 | 1.66 | 11.9% | 8.10 | 7.19 | 11.2% | 4.28× |
+| **16k** | **2.66** | **2.21** | **16.9%** | **14.51** | **12.69** | **12.5%** | **5.45×** |
+
+- 代码：`src/bench/memory.py` 新增 `--mode zoo`（直接调用 `src/train/zoo.py::zo_grad`，D=8、eps=1e-3，前向在 `no_grad` 下）；`--zoo-directions/--zo-eps`。
+- 结论：**ZOO 的显存随上下文近似线性（~0.1 GiB/1k），BP 在长上下文快 0.9 GiB/1k** → 16k 时 ZOO 仅 2.66 GiB（BP 14.51），**5.5×**；且 ZOO 在 8GB 卡上可跑 16k。
+- 稀疏节省：相对值 ZOO 更大（16.9% vs 12.5%），绝对值 BP 更大（1.82 vs 0.45 GiB）。
+- 原 "forward" 列实为 training-mode 前向（建图，≈BP−0.2 GiB），不能当作 ZOO。
+- 产物：`temp/mem_sweep_zoo/summary.md`。

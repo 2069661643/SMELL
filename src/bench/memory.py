@@ -32,8 +32,11 @@ def parse_args():
                         help='filter, e.g. "sparse=1,dense=0;lora=attn;ckpt=1"')
     parser.add_argument("--cap-fraction", type=float, default=0.9)
     parser.add_argument("--steps", type=int, default=1)
-    parser.add_argument("--mode", choices=("forward", "backward"), default="forward",
-                        help="forward = ZOO 主线显存；backward = BP 对照（16k 8GB 会 OOM）")
+    parser.add_argument("--mode", choices=("forward", "backward", "zoo"), default="forward",
+                        help="forward = training-mode 前向（建图）；backward = BP；zoo = 真实 zo_grad（no_grad 前向）")
+    # SMELL 3 bench_zoo ADD — 真实 ZOO 路径的显存测量（zo_grad：no_grad 前向，不建图）
+    parser.add_argument("--zoo-directions", type=int, default=8, help="zoo mode: number of FD directions")
+    parser.add_argument("--zo-eps", type=float, default=1e-3, help="zoo mode: FD step size")
     parser.add_argument("--out", default=None, help="JSON output path")
     return parser.parse_args()
 
@@ -118,11 +121,19 @@ def run_combo(combo, args):
     free_before, _ = torch.cuda.mem_get_info()
     started = time.time()
     loss = None
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        for _ in range(args.steps):
-            loss = model(input_ids, labels=input_ids).loss
-            if args.mode == "backward":
-                loss.backward()
+    if args.mode == "zoo":
+        # SMELL 3 bench_zoo ADD — 走仓库真实实现：zo_grad 内部每次 forward 都在 torch.no_grad() 下
+        from src.train.zoo import zo_grad
+        model.eval()
+        def loss_fn():
+            return model(input_ids, labels=input_ids).loss
+        _ = zo_grad(model, loss_fn, eps=args.zo_eps, num_directions=args.zoo_directions)
+    else:
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            for _ in range(args.steps):
+                loss = model(input_ids, labels=input_ids).loss
+                if args.mode == "backward":
+                    loss.backward()
     torch.cuda.synchronize()
     elapsed = time.time() - started
     peak_allocated = torch.cuda.max_memory_allocated()
@@ -134,7 +145,9 @@ def run_combo(combo, args):
         "mode": args.mode,
         "seq_len": args.seq_len,
         "steps": args.steps,
-        "loss": float(loss.detach().cpu()),
+        "loss": (float(loss.detach().cpu()) if loss is not None else None),
+        "zoo_directions": (args.zoo_directions if args.mode == "zoo" else None),
+        "zo_eps": (args.zo_eps if args.mode == "zoo" else None),
         "peak_allocated_gb": peak_allocated / 1024 ** 3,
         "free_before_gb": free_before / 1024 ** 3,
         "free_after_gb": free_after / 1024 ** 3,
