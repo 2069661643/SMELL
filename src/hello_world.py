@@ -35,6 +35,9 @@ JENGA_IMPORTS = (
     ("jenga.models.predictor.PrunableAttnPredictor", "jenga.models.predictor", "PrunableAttnPredictor"),
 )
 SRC_MODULES = (
+    "src.compress.count_sketch",
+    "src.bench.memory",
+    "src.eval.classify",
     "src.models.modeling_opt_smell",
     "src.models.position_embed",
     "src.models.token_selector",
@@ -66,10 +69,25 @@ JENGA_DATASETS = (
     "dataset/longbench",
 )
 SMELL_ARTIFACTS = (
+    # data (OPT + BERT)
     "dataset_v3/discovery_16k/a01/global_test_input_ids.npy",
     "dataset_v3/discovery_16k/a01/warmup_input_ids.npy",
     "dataset_v3/discovery_16k/a03/global_test_input_ids.npy",
     "dataset_v3/discovery_16k/a03/warmup_input_ids.npy",
+    "dataset_v3/arxiv_16k/a01/global_test_input_ids.npy",
+    "dataset_v3/arxiv_16k/a03/global_test_input_ids.npy",
+    # weights / context anchors
+    "third_party/Jenga/checkpoints/opt-350m/config.json",
+    "checkpoints/posemb_step1/a01_pos_only_500step/pos_embed.pt",
+    "checkpoints/predictor/step5_a01a03_clients_causal/predictor.pth",
+    "checkpoints/predictor/step5_a01a03_clients_causal/pruned_config.pth",
+    "checkpoints/distilbert_step1/a01_pos_head_1000step/pos_embed.pt",
+    "checkpoints/distilbert_step1/a01_pos_head_1000step/head.pt",
+    "checkpoints/predictor_bert/a01_warmup_400step/predictor.pth",
+    "checkpoints/predictor_bert/a01_warmup_400step/pruned_config.pth",
+    # code submodules
+    "third_party/VQ/main.py",
+    "third_party/FwdLLM/README.md",
 )
 
 RESULTS = []

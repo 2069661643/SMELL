@@ -25,7 +25,7 @@ src/        新代码全部写这里（third_party 只读，允许 COPY 进 src/
   fed/      serial_fedavg.py、run_fed.py
   compress/ count_sketch.py（VQ/Count Sketch，训练上行压缩）
   eval/     ppl.py、classify.py   bench/memory.py   hello_world.py(环境自检)
-scripts/    setup_server.sh、run_ablation_cloud.sh、hello-world.sh、diag_cos_*.py、paired_eval.py
+scripts/    setup_server.sh、check-env.sh（→src/hello_world.py）、run_ablation_cloud.sh、hello-world.sh、diag_cos_*.py、paired_eval.py、repro/（6 个论文复现脚本 + README）
 third_party/ 只读 submodule：FwdLLM / Jenga(OPT+数据+权重) / VQ(Count Sketch)
 reports/    交付包（git 跟踪）：reports/opt/ = OPT 图/表/报告；reports/bert_and_other/ = BERT + OPT fixed 自循环修复后（cycle）CSV+README+BERT_CONFIG（无图）；入口各自 make_report.py
 docs/       standard.md、weight-manifest.md、ailog/、paper/evaluation/redundancy/、old_ailog/、reference/(gitignore)
@@ -167,6 +167,12 @@ $PY src/fed/run_fed.py --arch distilbert --tag a01 --gpu 0 --trainer zoo \
 - 首次就绪：`git submodule update --init --recursive`（HTTPS 挂死用 SSH）→ 解压 `~/download/{dataset.zip,peft_model.zip,predictor.zip}` 到 `third_party/Jenga/` → 建 `smell-v3` env（`setup_server.sh` 硬编码 `$HOME/miniconda3`/`SMELL`，须改 `CONDA`/`--env-name`）→ 写 `jenga_src.pth` → 从 hf-mirror 拉 opt-350m → 重建数据并跑 `check_partition.py`。
 - `scripts/hello-world.sh` 也硬编码 `$HOME/miniconda3/envs/SMELL/bin/python`；云端用 `PYTHON=~/applications/anaconda3/envs/smell-v3/bin/python bash scripts/hello-world.sh` 覆盖。
 - 数据/权重/checkpoint 不进 git；`pos_embed.pt`/`adapter/`/`predictor.pth` 单独传输并核对 sha256。
+
+## 复现脚本
+
+- `scripts/repro/README.md`：实验 1–6（BERT 四臂/续训/技术线、OPT 四臂/续训+eval-off、显存 bench）的脚本与索引；
+- 公共设置 `scripts/repro/common.sh`（`PY/GPU/DRY_RUN/ARCHIVE_ROOT`），输出统一写 `logs/fed/repro_*`，不覆盖历史归档；
+- 环境自检：`bash scripts/check-env.sh`（Jenga hello_world 风格，34 项）。
 
 ## 构建 / 静态检查 / 测试
 
