@@ -139,6 +139,42 @@ def copy_adapter(src, dst_root, name):
     return dst
 
 
+PREREQ = [
+    ("OPT-350M", "pos_embed", REPO / "checkpoints" / "posemb_step1" / "a01_pos_only_500step" / "pos_embed.pt",
+     "weights/opt/pos_embed.pt", "run_fed/ppl 的 --pos-checkpoint"),
+    ("OPT-350M", "predictor", REPO / "checkpoints" / "predictor" / "step5_a01a03_clients_causal" / "predictor.pth",
+     "weights/opt/predictor.pth", "run_fed/ppl 的 --predictor"),
+    ("OPT-350M", "pruned_config", REPO / "checkpoints" / "predictor" / "step5_a01a03_clients_causal" / "pruned_config.pth",
+     "weights/opt/pruned_config.pth", "run_fed/ppl 的 --pruned-config"),
+    ("DistilBERT", "pos_embed", REPO / "checkpoints" / "distilbert_step1" / "a01_pos_head_1000step" / "pos_embed.pt",
+     "weights/bert/pos_embed.pt", "run_fed/classify 的 --pos-checkpoint"),
+    ("DistilBERT", "head", REPO / "checkpoints" / "distilbert_step1" / "a01_pos_head_1000step" / "head.pt",
+     "weights/bert/head.pt", "run_fed/classify 的 --head-checkpoint"),
+    ("DistilBERT", "predictor", REPO / "checkpoints" / "predictor_bert" / "a01_warmup_400step" / "predictor.pth",
+     "weights/bert/predictor.pth", "run_fed/classify 的 --predictor"),
+    ("DistilBERT", "pruned_config", REPO / "checkpoints" / "predictor_bert" / "a01_warmup_400step" / "pruned_config.pth",
+     "weights/bert/pruned_config.pth", "run_fed/classify 的 --pruned-config"),
+]
+
+
+def export_prereq():
+    rows = []
+    for model, kind, src, dest_rel, used_by in PREREQ:
+        if not src.exists():
+            raise SystemExit(f"[export] missing prerequisite: {src}")
+        dest = OUT / dest_rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        rows.append({"model": model, "kind": kind, "dest": dest_rel, "source": str(src.relative_to(REPO)),
+                     "bytes": dest.stat().st_size, "sha256": sha256(dest), "used_by": used_by})
+    with open(OUT / "WEIGHTS.csv", "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return rows
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-check", action="store_true")
@@ -197,6 +233,8 @@ def main():
     if table7.exists():
         shutil.copy2(table7, OUT / "resample" / "table7_d_comparison.csv")
 
+    prereq_rows = export_prereq()
+
     # memory table (no weights)
     mem_src = REPO / "reports" / "mem"
     (OUT / "memory").mkdir(parents=True, exist_ok=True)
@@ -230,6 +268,8 @@ def main():
         "- `evals/<group>/<name>/` — 对应端点评测 JSON（`eval_*` 带 mask；`evaloff_*` 无 mask）",
         "- `memory/` — Table `tab:mem_peak` 的 OPT-350M 数据（`mem_summary.csv` / `mem_tidy.csv`）",
         "- `resample/table7_d_comparison.csv` — Table `tab:resample` 的 r7 端点值（D16/D22/D32）",
+        "- `weights/opt|bert/` — 复现所需的前置权重：`pos_embed.pt`、`head.pt`（BERT）、`predictor.pth`、`pruned_config.pth`",
+        "- `WEIGHTS.csv` — 前置权重的 sha256 / 大小 / 用途",
         "- `MANIFEST.csv` — 论文表 → adapter → eval JSON → 指标数值 → 来源 run",
         "- `SHA256SUMS` — 全部文件校验和",
         "",
@@ -248,6 +288,19 @@ def main():
         "  --pruned-config checkpoints/predictor/step5_a01a03_clients_causal/pruned_config.pth \\",
         "  --adapter <adapter_dir> --out <out.json>`",
         "DistilBERT 评测：`src/eval/classify.py ... --adapter <adapter_dir>`（见 `README.md` 复现一节）。",
+        "",
+        "## 前置权重（pos_embed / predictor / head / pruned_config）",
+        "",
+        "| 模型 | 文件 | 用途 |",
+        "|---|---|---|",
+        "| OPT-350M | `weights/opt/pos_embed.pt` | `--pos-checkpoint`（位置适配） |",
+        "| OPT-350M | `weights/opt/predictor.pth` + `pruned_config.pth` | `--predictor` / `--pruned-config`（Jenga 块打分） |",
+        "| DistilBERT | `weights/bert/pos_embed.pt` | `--pos-checkpoint` |",
+        "| DistilBERT | `weights/bert/head.pt` | `--head-checkpoint`（Step-1 分类头） |",
+        "| DistilBERT | `weights/bert/predictor.pth` + `pruned_config.pth` | `--predictor` / `--pruned-config` |",
+        "",
+        "底座模型（`facebook/opt-350m`、`distilbert-base-uncased`）不随包分发，按 `docs/weight-manifest.md` 放到",
+        "`third_party/Jenga/checkpoints/` 即可；本包的 adapter 均在上述底座 + 前置权重下评测。",
         "",
         "## 与论文表的对应",
         "",
